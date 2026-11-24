@@ -1,3 +1,4 @@
+local proc = require("../utils/proc.luau")
 local schema = require("../utils/schema.luau")
 local request = require("./actions.luau")
 local rerender = require("./rerender.luau")
@@ -144,7 +145,7 @@ local function on_search_type(val)
 		return
 	end
 
-	noctalia.runAsync("sleep 0.4", function()
+	proc.runAsync("sleep 0.4", function()
 		if view.search_timer_nonce == current_nonce then
 			do_search(target_q)
 		end
@@ -239,7 +240,7 @@ local function hover_render()
 	end
 	hover_render_nonce = hover_render_nonce + 1
 	local n = hover_render_nonce
-	noctalia.runAsync("sleep 0.03", function()
+	proc.runAsync("sleep 0.03", function()
 		if hover_render_nonce == n then
 			last_hover_render_at = noctalia.nowMs()
 			rerender.call()
@@ -267,7 +268,7 @@ local function hover_update(slot, hover_state, key)
 			end
 			local n = track_leave_timer_nonce + 1
 			track_leave_timer_nonce = n
-			noctalia.runAsync("sleep 0.06", function()
+			proc.runAsync("sleep 0.06", function()
 				if track_leave_timer_nonce == n and view.hover_key.track == key then
 					if view.expanded_row_key ~= key then
 						view.hover_key.track = nil
@@ -305,7 +306,7 @@ local function track_hover(hover_state, row_key, sub, item)
 			if view.expanded_row_key ~= row_key then
 				local n = hover_intent_nonce + 1
 				hover_intent_nonce = n
-				noctalia.runAsync("sleep 0.12", function()
+				proc.runAsync("sleep 0.12", function()
 					if hover_intent_nonce == n and view.hover_key.track == row_key then
 						view.expanded_track_id = item.id
 						view.expanded_row_key = row_key
@@ -323,7 +324,7 @@ local function track_hover(hover_state, row_key, sub, item)
 		if view.expanded_row_key == row_key then
 			local n = collapse_timer_nonce + 1
 			collapse_timer_nonce = n
-			noctalia.runAsync("sleep 0.25", function()
+			proc.runAsync("sleep 0.25", function()
 				if collapse_timer_nonce == n and view.expanded_row_key == row_key then
 					collapse_track()
 					if view.hover_key.track == row_key then
@@ -335,7 +336,7 @@ local function track_hover(hover_state, row_key, sub, item)
 		else
 			local n = track_leave_timer_nonce + 1
 			track_leave_timer_nonce = n
-			noctalia.runAsync("sleep 0.06", function()
+			proc.runAsync("sleep 0.06", function()
 				if track_leave_timer_nonce == n and view.hover_key.track == row_key then
 					if view.expanded_row_key ~= row_key then
 						view.hover_key.track = nil

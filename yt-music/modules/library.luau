@@ -1,3 +1,4 @@
+local proc = require("../utils/proc.luau")
 local store = require("./store.luau")
 local api = require("../api.luau")
 local logger = require("../utils/log.luau")
@@ -50,7 +51,7 @@ function Library.save_offline_meta()
 		return
 	end
 	save_meta_pending = true
-	noctalia.runAsync("true", function()
+	proc.runAsync("true", function()
 		save_meta_pending = false
 		local ok, encoded = pcall(noctalia.json.encode, state.offline_meta)
 		if ok and encoded then
@@ -91,7 +92,7 @@ function Library.save_cached_meta()
 		return
 	end
 	save_cached_meta_pending = true
-	noctalia.runAsync("true", function()
+	proc.runAsync("true", function()
 		save_cached_meta_pending = false
 		local ok, encoded = pcall(noctalia.json.encode, cached_meta)
 		if ok and encoded then
@@ -164,7 +165,7 @@ function Library.resolve_missing_meta(vids: { string })
 		local vid = vids[idx]
 		idx = idx + 1
 		local url = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=" .. vid .. "&format=json"
-		noctalia.runAsync({ "curl", "-s", "--max-time", "5", url }, function(res)
+		proc.runAsync({ "curl", "-s", "--max-time", "5", url }, function(res)
 			if type(res) == "table" and res.stdout and res.stdout ~= "" then
 				local data = noctalia.json.decode(res.stdout)
 				if type(data) == "table" and data.title then
@@ -196,7 +197,7 @@ function Library.resolve_missing_meta(vids: { string })
 					end
 				end
 			end
-			noctalia.runAsync("sleep 0.2", next_vid)
+			proc.runAsync("sleep 0.2", next_vid)
 		end)
 	end
 
@@ -424,7 +425,7 @@ function Library.audit_downloaded_playlists()
 			finalize()
 			return
 		end
-		noctalia.runAsync("true", function()
+		proc.runAsync("true", function()
 			pcall(function()
 				local tracks = api.load_cached_playlist(sources[idx])
 				if tracks and #tracks > 0 then

@@ -1,3 +1,4 @@
+local proc = require("../utils/proc.luau")
 local Playlist = {}
 
 local store = require("./store.luau")
@@ -83,7 +84,7 @@ end
 
 local function save_cache(pid)
 	if api and api.save_playlist_cache then
-		noctalia.runAsync("true", function()
+		proc.runAsync("true", function()
 			-- Never persist obviously-wrong snapshots: more rows than the
 			-- declared count means stale/garbage data slipped through.
 			local total = tonumber(state.playlist.count) or 0
@@ -98,7 +99,7 @@ end
 
 local function ensure_thumbs(kind)
 	if api and api.ensure_thumbnails then
-		noctalia.runAsync("true", function()
+		proc.runAsync("true", function()
 			api.ensure_thumbnails(state.playlist.tracks, store.publish, kind)
 		end)
 	end
@@ -287,7 +288,7 @@ function Playlist.open(pid, title)
 				commit_staging(pid)
 				stamp_walk(pid, #state.playlist.tracks)
 				if res.next_token and res.next_token ~= "" then
-					noctalia.runAsync("true", function()
+					proc.runAsync("true", function()
 						do_fetch(pid, res.next_token)
 					end)
 				end
@@ -476,7 +477,7 @@ do_fetch = function(pid, fetch_token)
 				end
 				prefetch_pages = prefetch_pages + 1
 				log("[" .. mode .. "] page was all duplicates, skipping to next")
-				noctalia.runAsync("true", function()
+				proc.runAsync("true", function()
 					do_fetch(pid, new_token)
 				end)
 				return
@@ -517,7 +518,7 @@ do_fetch = function(pid, fetch_token)
 			settle(pid)
 			-- Keep walking the continuations; runAsync defers the call so the
 			-- chain stays iterative instead of recursing through do_fetch.
-			noctalia.runAsync("true", function()
+			proc.runAsync("true", function()
 				prefetch_more(pid)
 			end)
 		end)

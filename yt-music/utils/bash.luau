@@ -1,3 +1,4 @@
+local proc = require("./proc.luau")
 local Bash = {}
 
 local PLUGIN_DIR = noctalia.pluginDir()
@@ -26,9 +27,9 @@ function Bash.run_script(file, fn, cb, timeout, ...)
 		cmd = cmd .. " " .. Bash.sh_quote(a)
 	end
 	if type(cb) == "function" then
-		return noctalia.runAsync(cmd, cb, timeout)
+		return proc.runAsync(cmd, cb, timeout)
 	end
-	return noctalia.runAsync(cmd)
+	return proc.runAsync(cmd)
 end
 
 -- Long-lived stream: runs the same shaped command but routes every stdout line
@@ -39,7 +40,7 @@ function Bash.run_stream(file, fn, on_line, ...)
 	for _, a in ipairs({ ... }) do
 		cmd = cmd .. " " .. Bash.sh_quote(a)
 	end
-	return noctalia.runStream(cmd, on_line)
+	return proc.runStream(cmd, on_line)
 end
 
 return Bash

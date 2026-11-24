@@ -1,4 +1,3 @@
-require("./utils/benchspawn.luau")("panel")
 local STATE_KEY = "yt_music.state"
 
 local theme = require("./utils/theme.luau")

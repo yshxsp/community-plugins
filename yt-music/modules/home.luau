@@ -1,3 +1,4 @@
+local proc = require("../utils/proc.luau")
 local store = require("./store.luau")
 local api = require("../api.luau")
 
@@ -43,7 +44,7 @@ function Home.fetch_home_thumbs()
 		end
 	end
 	if #combined > 0 then
-		noctalia.runAsync("true", function()
+		proc.runAsync("true", function()
 			api.ensure_thumbnails(combined, store.publish, "home")
 		end)
 	end

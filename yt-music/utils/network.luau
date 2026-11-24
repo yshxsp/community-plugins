@@ -1,3 +1,4 @@
+local proc = require("./proc.luau")
 -- Global network gate ("middleware"): every outbound-capable launch goes
 -- through here. When offline, calls are refused BEFORE spawning and callers
 -- receive a synthetic failed result, so pending flags/spinners always settle.
@@ -30,13 +31,13 @@ end
 function Net.runAsync(cmd, cb, timeout, tag)
 	if not online then
 		if cb then
-			noctalia.runAsync("true", function()
+			proc.runAsync("true", function()
 				cb(synthetic_result())
 			end)
 		end
 		return false
 	end
-	return noctalia.runAsync(cmd, cb, timeout)
+	return proc.runAsync(cmd, cb, timeout)
 end
 
 -- Drop-in for noctalia.http; offline delivers a failed response object.
@@ -45,7 +46,7 @@ function Net.http(req, cb)
 		cb({ ok = false, status = 0, body = "" })
 		return false
 	end
-	return noctalia.http(req, cb)
+	return proc.http(req, cb)
 end
 
 return Net

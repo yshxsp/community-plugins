@@ -1,4 +1,4 @@
-require("./utils/benchspawn.luau")("service")
+local proc = require("./utils/proc.luau")
 local REQ_KEY = "yt_music.request"
 
 local api = require("./api.luau")
@@ -32,7 +32,7 @@ local function log_boot_env()
 	end
 	local desktop = noctalia.getenv("XDG_CURRENT_DESKTOP") or "?"
 	local session = noctalia.getenv("XDG_SESSION_TYPE") or "?"
-	noctalia.runAsync("noctalia --version 2>/dev/null | head -1", function(res)
+	proc.runAsync("noctalia --version 2>/dev/null | head -1", function(res)
 		local out = (type(res) == "table" and res.stdout) or ""
 		local host = out:match("noctalia%s+(v?[%d%.]+)") or "?"
 		log(
@@ -202,7 +202,7 @@ local ACTIONS = {
 	fetch_offline = function(r)
 		library.sync_audio_cache()
 		if api and api.ensure_thumbnails and type(state.offline_tracks) == "table" and #state.offline_tracks > 0 then
-			noctalia.runAsync("true", function()
+			proc.runAsync("true", function()
 				api.ensure_thumbnails(state.offline_tracks, store.publish, "offline")
 			end)
 		end
@@ -262,7 +262,7 @@ local ACTIONS = {
 					table.insert(items, pl)
 				end
 			end
-			noctalia.runAsync("true", function()
+			proc.runAsync("true", function()
 				api.ensure_thumbnails(items, store.publish, "artist")
 			end)
 		end)
@@ -286,7 +286,7 @@ noctalia.state.watch(REQ_KEY, function(req)
 
 	local handler = ACTIONS[action]
 	if handler then
-		noctalia.runAsync("true", function()
+		proc.runAsync("true", function()
 			local ok, err = pcall(handler, req)
 			if not ok then
 				log("request error in '" .. action .. "': " .. tostring(err))
@@ -304,7 +304,7 @@ function update()
 			if type(playlists) == "table" and #playlists > 0 then
 				state.library = playlists
 				log("ytmusic: loaded " .. #playlists .. " library playlists")
-				noctalia.runAsync("true", function()
+				proc.runAsync("true", function()
 					api.ensure_thumbnails(state.library, store.publish, "library")
 				end)
 			else
@@ -319,7 +319,7 @@ function update()
 	probe_tick = probe_tick + 1
 	if probe_tick >= 20 then
 		probe_tick = 0
-		noctalia.runAsync(
+		proc.runAsync(
 			"curl -s -o /dev/null -m 6 https://music.youtube.com && echo 'NET=UP' || echo 'NET=DOWN'",
 			function(res)
 				local out = (type(res) == "table" and res.stdout) or ""
@@ -355,7 +355,7 @@ if api and api.load_cached_library then
 		state.library = cached_lib
 	end
 end
-noctalia.runAsync("true", function()
+proc.runAsync("true", function()
 	local const = require("./api/constants.luau")
 	if not noctalia.fileExists(const.COOKIE_PATH) then
 		-- Signed out (e.g. cookies cleared between runs): drop recently-played

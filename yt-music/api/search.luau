@@ -1,4 +1,5 @@
 --!strict
+local proc = require("../utils/proc.luau")
 --!nolint MultiLineStatement
 
 local logger = require("../utils/log.luau")
@@ -57,7 +58,7 @@ function EXPO.search_playlists(q: string, count: number, cb: ({ types.SearchResu
 			end
 			local raw_file = scratch.path("search-raw")
 			noctalia.writeFile(raw_file, raw_body)
-			noctalia.runAsync({ "jq", "-a", filters.SEARCH_PLAYLISTS, raw_file }, function(res)
+			proc.runAsync({ "jq", "-a", filters.SEARCH_PLAYLISTS, raw_file }, function(res)
 				local out_json = (type(res) == "table" and res.stdout) or ""
 				local data = noctalia.json.decode(out_json)
 				local rows = (type(data) == "table" and type(data.playlists) == "table") and data.playlists or {}
@@ -124,7 +125,7 @@ function EXPO.search(query: string?, count: any, cb: ({ types.SearchResult }?, s
 
 		local filter = st == "top" and filters.SEARCH_TOP or filters.SEARCH_TRACKS
 
-		noctalia.runAsync({ "jq", "-a", filter, raw_file }, function(res)
+		proc.runAsync({ "jq", "-a", filter, raw_file }, function(res)
 			local out: { types.SearchResult } = {}
 			local out_json = (type(res) == "table" and res.stdout) or ""
 			local data = noctalia.json.decode(out_json)

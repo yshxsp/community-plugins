@@ -1,3 +1,4 @@
+local proc = require("../utils/proc.luau")
 local Player = {}
 
 local store = require("./store.luau")
@@ -40,7 +41,7 @@ local queue_skip -- forward: Player.next/prev coalesce through this, defined bel
 -- and are untouched. The -[g] bracket form keeps pkill from matching its own
 -- command line.
 local function kill_stale_resolves(done)
-	local scheduled = noctalia.runAsync("pkill -f 'bestaudio/best -[g]' 2>/dev/null; true", function()
+	local scheduled = proc.runAsync("pkill -f 'bestaudio/best -[g]' 2>/dev/null; true", function()
 		if done then
 			done()
 		end
@@ -128,12 +129,12 @@ local function player_set(item, stream_url)
 		end
 	end
 	if api and api.ensure_thumbnails then
-		noctalia.runAsync("true", function()
+		proc.runAsync("true", function()
 			api.ensure_thumbnails(state.player.queue, publish, "queue")
 		end)
 	end
 	if api and api.save_session then
-		noctalia.runAsync("true", function()
+		proc.runAsync("true", function()
 			api.save_session(state.player)
 		end)
 	end
@@ -408,7 +409,7 @@ function Player.toggle()
 		state.player.status = "paused"
 		publish()
 	elseif state.player.status == "paused" then
-		noctalia.runAsync(
+		proc.runAsync(
 			[[
             SOCK="/tmp/yt-music/mpv.sock"
             [ -S "$SOCK" ] && echo "YES" || echo "NO"
@@ -500,7 +501,7 @@ queue_skip = function(dir)
 	pending_steps = pending_steps + dir
 	skip_nonce = skip_nonce + 1
 	local my = skip_nonce
-	local scheduled = noctalia.runAsync("sleep 0.25", function()
+	local scheduled = proc.runAsync("sleep 0.25", function()
 		if my ~= skip_nonce then
 			return
 		end

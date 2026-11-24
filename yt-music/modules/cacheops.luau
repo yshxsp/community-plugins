@@ -1,3 +1,4 @@
+local proc = require("../utils/proc.luau")
 local store = require("./store.luau")
 
 local api = require("../api.luau")
@@ -74,7 +75,7 @@ function Cache.fetch_stats()
 	state.refreshing_cache_stats = true
 	store.publish()
 
-	noctalia.runAsync("sleep 0.25", function()
+	proc.runAsync("sleep 0.25", function()
 		local intentional = get_intentional()
 		local total_audio = 0
 		local dl_bytes = 0

@@ -1,3 +1,4 @@
+local proc = require("../utils/proc.luau")
 local store = require("./store.luau")
 local api = require("../api.luau")
 
@@ -19,7 +20,7 @@ function Search.run(query, stype)
 		state.search.results = results or {}
 		store.publish()
 		if api and api.ensure_thumbnails then
-			noctalia.runAsync("true", function()
+			proc.runAsync("true", function()
 				api.ensure_thumbnails(state.search.results, store.publish, "search")
 			end)
 		end
