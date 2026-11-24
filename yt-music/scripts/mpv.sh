@@ -1,165 +1,96 @@
 #!/usr/bin/env bash
 # Invoked via:  bash scripts/mpv.sh <fn> <args...>
+#
+# Playback state reaches the plugin through scripts/ytm.lua (loaded into mpv)
+# over the IPC socket; commands go straight to the socket from Luau. This file
+# only starts and stops mpv.
 
-DIR="/tmp/yt-music"
+# Private per-user runtime dir (tmpfs, 0700) instead of a shared /tmp path.
+DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/yt-music"
 PIDFILE="$DIR/mpv.pid"
 SOCK="$DIR/mpv.sock"
-GENFILE="$DIR/mpv.gen"
+SCRIPT="${BASH_SOURCE[0]%/*}/ytm.lua"
+
+mkdir -p -m 700 "$DIR"
+if [ ! -O "$DIR" ] || [ -L "$DIR" ]; then
+  echo "unsafe runtime dir: $DIR" >&2
+  exit 1
+fi
+
+# Builtin sleep (bash loadables) keeps the wait loops fork-free.
+enable -f /usr/lib/bash/sleep sleep 2>/dev/null || true
 
 # mpv-mpris needs a multi-entry playlist to expose both transport directions.
 DUMMY="av://lavfi:anullsrc=r=48000:cl=stereo"
-mkdir -p "$DIR"
 
-# nc flavor, probed not assumed: OpenBSD nc needs -N to exit after stdin
-# EOF (mpv never closes the connection, so sends would hang till timeout
-# without it); ncat shuts down by default and rejects -N. Traditional and
-# busybox nc lack -U entirely (covered by the health check, not here).
-# All branches fail fast, so this costs nothing per invocation.
-NC_N=0
-if command -v nc >/dev/null 2>&1; then
-  _ncerr=$(printf '' | nc -N -w1 "$DIR/nc-probe-never" 2>&1)
-  case "$_ncerr" in *nvalid*|*sage*|*llegal*) ;; *) NC_N=1 ;; esac
-fi
-
-# stdin -> socket with prompt EOF shutdown on either flavor.
-nc_send() {   # $1=sock $2=timeout
-  if [ "$NC_N" = 1 ]; then
-    nc -U -N -w"$2" "$1"
-  else
-    nc -U -w"$2" "$1"
-  fi
-}
-# Succeeds iff a socket connection works.
-nc_check() {   # $1=sock $2=timeout
-  printf '' | nc_send "$1" "$2" >/dev/null 2>&1
+# Serialize overlapping launches/kills (rapid skips): without this a newer
+# launch can start while the older instance still holds the socket path.
+# Released on process exit, even under SIGKILL.
+lock() {
+  exec 9>"$DIR/mpv.lock"
+  flock 9 2>/dev/null || true
 }
 
-mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file(optional)
-  local vol="${1:-100}"
-  # Feed mpv-mpris cover-art-files so system widgets get mpris:artUrl.
-  local cover_opts=""
-  [ -n "$4" ] && [ -f "$4" ] && cover_opts="--cover-art-file=$4"
-
-  URL=$(cat "$2")
-  TITLE=$(cat "$3" 2>/dev/null)
-  START_MS=$(date +%s%N)
-  # Serialize overlapping plays (rapid skips): without this, a newer
-  # invocation can launch while the older instance is still holding the
-  # socket path, leaving the audible mpv without IPC : audio plays, but no
-  # duration/ticks/eof ever arrive and transport goes dead. Opportunistic:
-  # skipped where flock is unavailable. Released on process exit, even
-  # under SIGKILL.
-  if command -v flock >/dev/null 2>&1; then
-    exec 9>"$DIR/mpv.lock"
-    flock 9 || exit 1
+# Stop the instance recorded in the pidfile and wait (no polling processes)
+# until it is gone so the socket path is free.
+stop_previous() {   # $1=signal
+  local prev=""
+  [ -f "$PIDFILE" ] && read -r prev < "$PIDFILE"
+  rm -f "$PIDFILE"
+  if [ -n "$prev" ] && kill -"$1" "$prev" 2>/dev/null; then
+    local i
+    for i in {1..40}; do
+      kill -0 "$prev" 2>/dev/null || break
+      sleep 0.025
+    done
+    kill -0 "$prev" 2>/dev/null && kill -9 "$prev" 2>/dev/null
   fi
-  if [ -f "$PIDFILE" ]; then
-    PREV=$(cat "$PIDFILE" 2>/dev/null)
-    [ -n "$PREV" ] && kill "$PREV" >/dev/null 2>&1
-    rm -f "$PIDFILE"
-  fi
-  pkill -f "input-ipc-server=$SOCK" >/dev/null 2>&1
-  # Wait until the old instance actually exits and releases the socket path;
-  # a fixed sleep loses under load. The [.] keeps pgrep from matching its
-  # own command line (which contains the pattern text).
-  for i in $(seq 1 20); do
-    pgrep -f "input-ipc-server=.*mpv[.]sock" >/dev/null 2>&1 || break
-    sleep 0.1
-  done
-  pkill -9 -f "input-ipc-server=$SOCK" >/dev/null 2>&1
-  sleep 0.1
   rm -f "$SOCK"
+}
+
+mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file $5=cache_path $6=partial_path
+  local vol="${1:-100}" url="" title="" t0="$EPOCHREALTIME"
+  read -r url < "$2" || true
+  IFS= read -r title < "$3" 2>/dev/null || true
+  local extra=()
+  # Feed mpv-mpris cover-art-files so system widgets get mpris:artUrl.
+  [ -n "${4:-}" ] && [ -f "$4" ] && extra+=("--cover-art-file=$4")
+  [ -n "${5:-}" ] && [ -n "${6:-}" ] && extra+=("--script-opts=ytm-cache=$5,ytm-partial=$6")
+
+  lock
+  stop_previous TERM
   # 9>&-: mpv must not inherit the lock fd, or the lock would outlive this
   # script (held open by the playing mpv) and deadlock the next play.
-  nohup mpv "$DUMMY" "$URL" "$DUMMY" --playlist-start=1 \
+  nohup mpv "$DUMMY" "$url" "$DUMMY" --playlist-start=1 \
     --no-video --vo=null --vd=null --audio-display=no --no-osc --no-osd-bar \
     --demuxer-max-bytes=20M --demuxer-readahead-secs=60 --really-quiet --no-terminal \
-    --keep-open=always --pause=no \
-    --force-media-title="$TITLE" \
-    $cover_opts \
-    --input-ipc-server="$SOCK" --ao=pulse,pipewire,alsa,auto \
+    --keep-open=always --pause=no --volume="$vol" \
+    --force-media-title="$title" \
+    --script="$SCRIPT" "${extra[@]}" \
+    --input-ipc-server="$SOCK" --ao=pipewire,pulse,alsa,auto \
     >/dev/null 2>&1 9>&- &
   echo $! > "$PIDFILE"
-  echo $(( $(cat "$GENFILE" 2>/dev/null || echo 0) + 1 )) > "$GENFILE"
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    [ -S "$SOCK" ] && nc_check "$SOCK" 1 && break
-    sleep 0.2
+  local i
+  for i in {1..150}; do
+    [ -S "$SOCK" ] && break
+    sleep 0.01
   done
-  [ -S "$SOCK" ] && {
-    echo "READY=1 MS=$(( ($(date +%s%N) - START_MS) / 1000000 ))"
-    printf '{"command":["set_property","volume",%s]}\n' "$vol" | nc_send "$SOCK" 1 >/dev/null 2>&1
-  }
-  if command -v flock >/dev/null 2>&1; then
-    flock -u 9 2>/dev/null
-    exec 9>&- 2>/dev/null
+  if [ -S "$SOCK" ]; then
+    local ms=$(( (${EPOCHREALTIME/./} - ${t0/./}) / 1000 ))
+    echo "READY=1 MS=$ms"
   fi
-}
-
-mpv_send() {   # $1=payload json
-  local payload="$1"
-  [ -S "$SOCK" ] || exit 0
-  TMP=$(mktemp)
-  printf '%s\n' "$payload" > "$TMP"
-  nc_send "$SOCK" 2 < "$TMP" >/dev/null 2>&1
-  rm -f "$TMP"
 }
 
 mpv_kill() {
-  if command -v flock >/dev/null 2>&1; then
-    exec 9>"$DIR/mpv.lock"
-    flock 9 || exit 1
-  fi
-  if [ -f "$PIDFILE" ]; then
-    PREV=$(cat "$PIDFILE" 2>/dev/null)
-    [ -n "$PREV" ] && kill -9 "$PREV" >/dev/null 2>&1
-    rm -f "$PIDFILE"
-  fi
+  lock
+  stop_previous 9
+  # Strays from a crashed shell session, only seen at boot.
   pkill -9 -f "input-ipc-server=$SOCK" >/dev/null 2>&1
-  echo $(( $(cat "$GENFILE" 2>/dev/null || echo 0) + 1 )) > "$GENFILE"
   rm -f "$SOCK"
 }
 
-# Persistent push stream: one connection per mpv instance. mpv pushes
-# `end-file`/`property-change` events natively; time-pos is requested once per
-# second (the keep-alive loop doubles as the ticker), audio-bitrate every 10th
-# tick. The owning mpv's pid is captured at start; while that instance stays
-# alive the stream self-heals by reconnecting if the connection drops without
-# mpv dying. When that mpv instance dies (track switch or stop) the socket is
-# removed -> the loop exits and the plugin starts a fresh stream for the next
-# instance.
-mpv_stream() {
-  local pid gen
-  [ -S "$SOCK" ] || exit 0
-  pid=$(cat "$PIDFILE" 2>/dev/null)
-  [ -n "$pid" ] || exit 0
-  gen=$(cat "$GENFILE" 2>/dev/null)
-  while [ -S "$SOCK" ] && kill -0 "$pid" 2>/dev/null && [ "$(cat "$GENFILE" 2>/dev/null)" = "$gen" ]; do
-    # The whole pipeline runs behind a hard timeout so a hung member (e.g. nc
-    # closing the connection while the ticker's pipe never signals EOF) can
-    # NEVER wedge the loop: it self-terminates and the guards re-run.
-    timeout 120 bash <<EOF
-{
-echo '{"command":["observe_property",1,"pause"]}'
-echo '{"command":["observe_property",2,"duration"]}'
-echo '{"command":["observe_property",3,"eof-reached"]}'
-echo '{"command":["observe_property",4,"audio-codec-name"]}'
-echo '{"command":["observe_property",5,"audio-params/samplerate"]}'
-echo '{"command":["observe_property",6,"playlist-pos"]}'
-i=0
-while [ -S "$SOCK" ] && kill -0 "$pid" 2>/dev/null && [ "\$(cat "$GENFILE" 2>/dev/null)" = "$gen" ]; do
-  echo '{"command":["get_property","time-pos"],"request_id":100}'
-  if [ \$((i % 10)) -eq 0 ]; then
-    echo '{"command":["get_property","audio-bitrate"],"request_id":200}'
-  fi
-  i=\$((i + 1))
-  sleep 1
-done
-} | nc -U "$SOCK"
-EOF
-    sleep 1
-  done
-}
-
 fn="${1:?fn required}"; shift
-type -t "$fn" >/dev/null 2>&1 || { echo "unknown fn: $fn" >&2; exit 1; }
-"$fn" "$@"
+case "$fn" in
+  mpv_play|mpv_kill) "$fn" "$@" ;;
+  *) echo "unknown fn: $fn" >&2; exit 1 ;;
+esac

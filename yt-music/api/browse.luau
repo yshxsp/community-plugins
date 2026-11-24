@@ -31,6 +31,16 @@ local types = require("../utils/types.luau")
 local EXPO = {}
 
 local pending_library: any? = nil
+local library_hook: (() -> ())? = nil
+
+-- The service drains the result through finish_library as soon as a fetch
+-- settles, instead of polling library_pending() every second.
+local function settle_library(value: any)
+	pending_library = value
+	if library_hook then
+		library_hook()
+	end
+end
 
 -- The library landing page is a single gridRenderer page of ~25 entries; the
 -- rest of the library (older playlists — e.g. a user's per-year playlists) is
@@ -75,7 +85,7 @@ function EXPO.library()
 			attach_cached_thumbs(playlists)
 			save_library_cache(playlists)
 		end
-		pending_library = playlists
+		settle_library(playlists)
 	end
 
 	local function fetch_page(request)
@@ -87,7 +97,7 @@ function EXPO.library()
 				if #raw_pls > 0 then
 					build()
 				else
-					pending_library = false
+					settle_library(false)
 				end
 				return
 			end
@@ -99,7 +109,7 @@ function EXPO.library()
 					if #raw_pls > 0 then
 						build()
 					else
-						pending_library = false
+						settle_library(false)
 					end
 					return
 				end
@@ -125,6 +135,10 @@ function EXPO.library()
 	end
 
 	fetch_page({ context = CONTEXT.context, browseId = "FEmusic_library_landing" })
+end
+
+function EXPO.on_library_settled(fn: () -> ())
+	library_hook = fn
 end
 
 function EXPO.library_pending()

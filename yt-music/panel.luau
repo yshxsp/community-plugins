@@ -93,7 +93,27 @@ local function render_panel()
 	}, body))
 end
 
-rerender.set(render_panel)
+-- A closed panel keeps its runtime and watchers alive; rebuilding the whole
+-- UI tree for snapshots nobody can see is wasted work, so renders wait for
+-- onOpen.
+local visible = false
+rerender.set(function()
+	if visible then
+		render_panel()
+	end
+end)
+
+-- Once-a-second position (and bitrate) updates from the service.
+local TICK_KEY = "yt_music.tick"
+local function apply_tick(t)
+	local player = state.data.player
+	if type(t) ~= "table" or type(player) ~= "table" or t.id ~= player.id then
+		return
+	end
+	player.position = t.position
+	player.bitrate = t.bitrate
+	rerender.call()
+end
 
 function onSidebarHover(hover_state, key)
 	state.hover_update("sidebar", hover_state, key)
@@ -114,16 +134,24 @@ function onTrackContextMenu(actionId, trackId)
 end
 
 function onOpen(_context)
+	visible = true
 	theme.corner_radius_scale = noctalia.getSetting("shell.corner_radius_scale") or 1.0
 	theme.radius = 12 * theme.corner_radius_scale
 	local curr = noctalia.state.get(STATE_KEY)
 	if curr then
 		state.apply(curr)
 	end
+	apply_tick(noctalia.state.get(TICK_KEY))
+	render_panel()
+end
+
+function onClose()
+	visible = false
 end
 
 if noctalia.state and noctalia.state.watch then
 	noctalia.state.watch(STATE_KEY, state.apply)
+	noctalia.state.watch(TICK_KEY, apply_tick)
 	local curr = noctalia.state.get(STATE_KEY)
 	if curr then
 		state.apply(curr)

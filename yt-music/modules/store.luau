@@ -64,4 +64,20 @@ function Store.publish()
 	noctalia.state.set(STATE_KEY, snap)
 end
 
+-- Playback ticks (position once a second, bitrate) go on their own tiny key:
+-- noctalia.state copies every published value into each watching entry, and
+-- the full snapshot carries the library, queue and caches.
+local TICK_KEY = "yt_music.tick"
+local tick_nonce = 0
+
+function Store.publish_tick()
+	tick_nonce = tick_nonce + 1
+	noctalia.state.set(TICK_KEY, {
+		n = tick_nonce,
+		id = Store.state.player.id,
+		position = Store.state.player.position,
+		bitrate = Store.state.player.bitrate,
+	})
+end
+
 return Store

@@ -11,6 +11,8 @@ local state = store.state
 local log = logger.module("ytm", "player")
 
 local publish = store.publish
+local publish_tick = store.publish_tick
+local cache_with_ytdlp
 
 local stream_generation = 0
 
@@ -48,6 +50,37 @@ local function kill_stale_resolves(done)
 	end, 2000)
 	if not scheduled and done then
 		done()
+	end
+end
+
+-- Opus at ~140 kbps: 20 MiB of demuxer cache holds about 19 minutes.
+local MAX_DUMP_SECONDS = 18 * 60
+-- Track whose offline copy ytm.lua is expected to dump; cleared once handled.
+local pending_cache_item = nil
+-- Set while ytm.lua writes the dump, so a natural end of a short track does not
+-- start a duplicate yt-dlp download of the same file.
+local dump_in_progress = false
+
+local function mark_cached(item)
+	local was_cached = (state.cached_audio_ids and state.cached_audio_ids[item.id] == true)
+	if not state.cached_audio_ids then
+		state.cached_audio_ids = {}
+	end
+	state.cached_audio_ids[item.id] = true
+	local library = require("./library.luau")
+	library.note_cached_track(item)
+	if not was_cached then
+		library.audit_downloaded_playlists()
+	end
+end
+
+cache_with_ytdlp = function(item)
+	if api and api.cache_audio and item.id and item.id ~= "" then
+		api.cache_audio(item.id, function(ok)
+			if ok then
+				mark_cached(item)
+			end
+		end)
 	end
 end
 
@@ -90,28 +123,27 @@ local function player_set(item, stream_url)
 		title = item.title .. " - " .. item.artist
 	end
 
-	if api and api.cache_audio and item.id and item.id ~= "" then
-		api.cache_audio(item.id, function(ok)
-			if ok then
-				local was_cached = (state.cached_audio_ids and state.cached_audio_ids[item.id] == true)
-				if not state.cached_audio_ids then
-					state.cached_audio_ids = {}
-				end
-				state.cached_audio_ids[item.id] = true
-				local library = require("./library.luau")
-				library.note_cached_track(item)
-				if not was_cached then
-					library.audit_downloaded_playlists()
-				end
-			end
-		end)
+	-- Offline cache: ytm.lua saves the track from mpv's own demuxer cache once
+	-- it is fully buffered (no second download, no extra yt-dlp run). Tracks
+	-- too long for the 20 MiB cache, and dumps that fail, fall back to yt-dlp.
+	local cache_path, partial_path = nil, nil
+	pending_cache_item = nil
+	dump_in_progress = false
+	if item.id and item.id ~= "" and stream_url:sub(1, 1) ~= "/" then
+		local dur = tonumber(item.duration) or (api.stream_duration and api.stream_duration(item.id)) or 0
+		if dur > 0 and dur > MAX_DUMP_SECONDS then
+			cache_with_ytdlp(item)
+		else
+			cache_path, partial_path = api.audio_cache_paths(item.id)
+			pending_cache_item = item
+		end
 	end
 
 	mpv.play(stream_url, title, state.player.volume, function(ready)
 		if ready then
 			start_stream()
 		end
-	end, state.player.thumb_path) -- cached art -> mpris:artUrl via mpv-mpris
+	end, state.player.thumb_path, cache_path, partial_path) -- cached art -> mpris:artUrl via mpv-mpris
 	-- Speculative work happens only for settled playback: the song that
 	-- actually starts earns its next-track prefetch and queue thumbnails.
 	-- Skipped-over intents never get here, so rapid skipping spawns nothing
@@ -409,26 +441,18 @@ function Player.toggle()
 		state.player.status = "paused"
 		publish()
 	elseif state.player.status == "paused" then
-		proc.runAsync(
-			[[
-            SOCK="/tmp/yt-music/mpv.sock"
-            [ -S "$SOCK" ] && echo "YES" || echo "NO"
-        ]],
-			function(res)
-				if res and res.stdout and res.stdout:find("YES") then
-					mpv.send((noctalia.json.encode({ command = { "set_property", "pause", false } })))
-					state.player.status = "playing"
-					publish()
-				else
-					if #state.player.queue > 0 then
-						local idx = state.player.index > 0 and state.player.index or 1
-						Player.play_index(idx)
-					elseif state.player.id and state.player.id ~= "" then
-						Player.play(state.player)
-					end
-				end
+		if noctalia.fileExists(mpv.SOCK) then
+			mpv.send((noctalia.json.encode({ command = { "set_property", "pause", false } })))
+			state.player.status = "playing"
+			publish()
+		else
+			if #state.player.queue > 0 then
+				local idx = state.player.index > 0 and state.player.index or 1
+				Player.play_index(idx)
+			elseif state.player.id and state.player.id ~= "" then
+				Player.play(state.player)
 			end
-		)
+		end
 	elseif state.player.status == "stopped" or state.player.status == "idle" then
 		if #state.player.queue > 0 then
 			local idx = state.player.index > 0 and state.player.index or 1
@@ -674,10 +698,44 @@ local function handle_stream_line(line)
 	if type(data) ~= "table" then
 		return
 	end
+	if data.event == "client-message" then
+		local args = data.args
+		if type(args) ~= "table" or args[1] ~= "ytm" then
+			return
+		end
+		data = noctalia.json.decode(tostring(args[2] or ""))
+		if type(data) ~= "table" then
+			return
+		end
+	end
+	if data.event == "ytm-cache-started" then
+		dump_in_progress = true
+		return
+	elseif data.event == "ytm-cached" then
+		local item = pending_cache_item
+		pending_cache_item = nil
+		dump_in_progress = false
+		if item then
+			log("stream: cached from mpv buffer id=" .. tostring(item.id))
+			mark_cached(item)
+		end
+		return
+	elseif data.event == "ytm-cache-failed" then
+		local item = pending_cache_item
+		pending_cache_item = nil
+		dump_in_progress = false
+		if item then
+			log("stream: mpv cache dump failed, falling back to yt-dlp id=" .. tostring(item.id))
+			cache_with_ytdlp(item)
+		end
+		return
+	end
 
-	-- Genuine failures only: a skip aborts with "stop", a natural end "eof".
+	-- Genuine failures only: ytm.lua retries the 403 a fresh stream URL gives
+	-- for its first seconds and reports ytm-load-failed once it gives up; mpv's
+	-- own end-file errors are those retries and are ignored here.
 	if data.event ~= "property-change" then
-		if data.event == "end-file" and data.reason == "error" and state.player.status == "playing" then
+		if data.event == "ytm-load-failed" and state.player.status == "playing" then
 			log(
 				"stream: end-file error ("
 					.. tostring(data.file_error or "?")
@@ -699,14 +757,19 @@ local function handle_stream_line(line)
 				and pos ~= state.player.position
 			then
 				state.player.position = pos
-				publish()
+				publish_tick()
 			end
 		elseif data.request_id == 200 then
 			local v = tonumber(data.data)
 			if v and v ~= state.player.bitrate then
+				local first = not state.player.codec_fetched
 				state.player.bitrate = v
 				state.player.codec_fetched = true
-				publish()
+				if first then
+					publish()
+				else
+					publish_tick()
+				end
 			end
 		end
 		return
@@ -716,6 +779,10 @@ local function handle_stream_line(line)
 	if name == "eof-reached" then
 		local st = state.player.status
 		if data.data == true and (st == "playing" or st == "paused") then
+			if pending_cache_item and pending_cache_item.id == state.player.id and not dump_in_progress then
+				cache_with_ytdlp(pending_cache_item)
+				pending_cache_item = nil
+			end
 			log("stream: eof-reached -> next(true)")
 			Player.next(true)
 		end

@@ -6,7 +6,6 @@ local store = require("./modules/store.luau")
 local state = store.state
 
 local handled_nonce = 0
-local probe_tick = 19
 
 local logger = require("./utils/log.luau")
 local network = require("./utils/network.luau")
@@ -32,6 +31,10 @@ local function log_boot_env()
 	end
 	local desktop = noctalia.getenv("XDG_CURRENT_DESKTOP") or "?"
 	local session = noctalia.getenv("XDG_SESSION_TYPE") or "?"
+	-- Only worth a process when the line is actually logged.
+	if noctalia.getConfig("debug_logging") ~= true then
+		return
+	end
 	proc.runAsync("noctalia --version 2>/dev/null | head -1", function(res)
 		local out = (type(res) == "table" and res.stdout) or ""
 		local host = out:match("noctalia%s+(v?[%d%.]+)") or "?"
@@ -297,46 +300,70 @@ noctalia.state.watch(REQ_KEY, function(req)
 	end
 end)
 
-function update()
-	if api.library_pending() then
-		api.finish_library(function(playlists)
-			state.refreshing_library = false
-			if type(playlists) == "table" and #playlists > 0 then
-				state.library = playlists
-				log("ytmusic: loaded " .. #playlists .. " library playlists")
-				proc.runAsync("true", function()
-					api.ensure_thumbnails(state.library, store.publish, "library")
-				end)
-			else
-				log("ytmusic: library fetch failed or empty, keeping existing library")
-			end
-			store.publish()
-		end)
+local function drain_library()
+	if not api.library_pending() then
+		return
 	end
+	api.finish_library(function(playlists)
+		state.refreshing_library = false
+		if type(playlists) == "table" and #playlists > 0 then
+			state.library = playlists
+			log("ytmusic: loaded " .. #playlists .. " library playlists")
+			proc.runAsync("true", function()
+				api.ensure_thumbnails(state.library, store.publish, "library")
+			end)
+		else
+			log("ytmusic: library fetch failed or empty, keeping existing library")
+		end
+		store.publish()
+	end)
+end
+api.on_library_settled(drain_library)
 
-	-- Connectivity probe every ~20s (update ticks at 1s). First probe fires
-	-- one tick after boot thanks to the pre-advanced counter.
-	probe_tick = probe_tick + 1
-	if probe_tick >= 20 then
-		probe_tick = 0
-		proc.runAsync(
-			"curl -s -o /dev/null -m 6 https://music.youtube.com && echo 'NET=UP' || echo 'NET=DOWN'",
-			function(res)
-				local out = (type(res) == "table" and res.stdout) or ""
-				local now_online = out:find("NET=UP", 1, true) ~= nil
-				if now_online ~= state.online then
-					state.online = now_online
-					network.setOnline(now_online)
-					store.publish()
-					log(now_online and "network: back online" or "network: offline")
-				end
-			end,
-			5000
-		)
+-- Connectivity: nothing runs while requests succeed. A transport failure
+-- (network.reportFailure) starts an in-process probe now and every 20 s until
+-- YouTube Music answers again; then update() drops back to an hourly no-op.
+local IDLE_INTERVAL = 3600 * 1000
+local PROBE_INTERVAL = 20 * 1000
+local probing = false
+local probe_in_flight = false
+
+local function set_online(now_online)
+	if now_online ~= state.online then
+		state.online = now_online
+		network.setOnline(now_online)
+		store.publish()
+		log(now_online and "network: back online" or "network: offline")
 	end
 end
 
-noctalia.setUpdateInterval(1000)
+local function probe()
+	if probe_in_flight then
+		return
+	end
+	probe_in_flight = true
+	network.probe(function(up)
+		probe_in_flight = false
+		set_online(up)
+		if up and probing then
+			probing = false
+			noctalia.setUpdateInterval(IDLE_INTERVAL)
+		elseif not up and not probing then
+			probing = true
+			noctalia.setUpdateInterval(PROBE_INTERVAL)
+		end
+	end)
+end
+
+network.onFailure(probe)
+
+function update()
+	if probing then
+		probe()
+	end
+end
+
+noctalia.setUpdateInterval(IDLE_INTERVAL)
 
 log("boot: service started, api=" .. tostring(type(api)) .. " library=" .. tostring(type(api and api.library)))
 log_boot_env()
@@ -404,6 +431,10 @@ function onIpc(event, payload)
 	local req = {}
 	if type(payload) == "table" then
 		req = payload
+	elseif type(payload) == "string" and payload:sub(1, 1) == "@" then
+		-- "@<path>": the IPC socket caps message size, so big payloads
+		-- (a whole queue) travel through a JSON file.
+		req = noctalia.json.decode(noctalia.readFile(payload:sub(2)) or "") or {}
 	elseif type(payload) == "string" and payload ~= "" then
 		req = noctalia.json.decode(payload) or {}
 	end

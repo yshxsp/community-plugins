@@ -58,6 +58,14 @@ local function save_cache()
 	end
 end
 
+-- Filled by the stream resolve, which prints the counts in the same yt-dlp
+-- run, so track_stats normally answers from cache without spawning.
+function EXPO.store_stats(video_id: string, views: number, likes: number)
+	load_cache()
+	stats_cache[video_id] = { views = views, likes = likes, timestamp = os.time() }
+	save_cache()
+end
+
 function EXPO.track_stats(video_id: string, cb: ((number, number) -> ())?)
 	if type(video_id) ~= "string" or video_id == "" then
 		if cb then

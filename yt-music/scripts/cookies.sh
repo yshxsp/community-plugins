@@ -83,12 +83,14 @@ open_browser() {   # $1=browser id
     if [ "$b" = "firefox" ] || [ "$b" = "zen" ]; then
       "$B" "https://music.youtube.com" >/dev/null 2>&1 &
     else
-      # Clean up lingering processes and locks to ensure port 9222 binds
+      # Clean up lingering processes and locks. Port 0 lets the browser pick a
+      # free port and record it in $cache_dir/DevToolsActivePort, instead of a
+      # fixed, guessable 9222.
       pkill -9 -f "yt-music/profiles/$b" 2>/dev/null || true
       rm -rf "$cache_dir" 2>/dev/null
       mkdir -p "$cache_dir"
       sleep 0.5
-      "$B" --remote-debugging-port=9222 --user-data-dir="$cache_dir" "https://music.youtube.com" >/dev/null 2>&1 &
+      "$B" --remote-debugging-port=0 --user-data-dir="$cache_dir" "https://music.youtube.com" >/dev/null 2>&1 &
     fi
   else
     xdg-open "https://music.youtube.com" >/dev/null 2>&1 &
@@ -97,6 +99,8 @@ open_browser() {   # $1=browser id
 
 extract_cookies() {   # $1=browser id
   local browser="$1"
+  # Cookie files (raw and final) are credentials: owner-only.
+  umask 077
   export PATH="/etc/profiles/per-user/$USER/bin:$PATH"
   TMPD=$(mktemp -d /tmp/yt-music.XXXXXX 2>/dev/null)
   [ -n "$TMPD" ] || { TMPD=/tmp/yt-music; mkdir -p "$TMPD"; }
@@ -109,38 +113,41 @@ extract_cookies() {   # $1=browser id
 
   local cdp_done=0
   if [ "$browser" != "firefox" ] && [ "$browser" != "zen" ]; then
-    logger -t "ytm/cookies" "[ytm/cookies] Waiting up to 5s for CDP port 9222 to open..."
+    local port_file="$OUT_DIR/profiles/$browser/DevToolsActivePort" PORT=""
+    logger -t "ytm/cookies" "[ytm/cookies] Waiting up to 5s for the CDP port to open..."
     PAGE_JSON=""
     for i in 1 2 3 4 5; do
-      PAGE_JSON=$(curl -s http://127.0.0.1:9222/json 2>/dev/null || echo "")
+      [ -z "$PORT" ] && [ -f "$port_file" ] && read -r PORT < "$port_file"
+      case "$PORT" in ''|*[!0-9]*) PORT=""; sleep 1; continue ;; esac
+      PAGE_JSON=$(curl -s "http://127.0.0.1:$PORT/json" 2>/dev/null || echo "")
       if [ -n "$PAGE_JSON" ]; then
-        logger -t "ytm/cookies" "[ytm/cookies] CDP port 9222 became ready on try $i"
+        logger -t "ytm/cookies" "[ytm/cookies] CDP port $PORT became ready on try $i"
         break
       fi
       sleep 1
     done
 
     if [ -z "$PAGE_JSON" ]; then
-      logger -t "ytm/cookies" "[ytm/cookies] CDP port 9222 not reachable after 5s wait"
+      logger -t "ytm/cookies" "[ytm/cookies] CDP port $PORT not reachable after 5s wait"
     else
-      logger -t "ytm/cookies" "[ytm/cookies] CDP port 9222 returned JSON length=${#PAGE_JSON}"
+      logger -t "ytm/cookies" "[ytm/cookies] CDP port $PORT returned JSON length=${#PAGE_JSON}"
     fi
 
     PAGE_WS=$(echo "$PAGE_JSON" | jq -r '.[] | select(.type == "page") | .webSocketDebuggerUrl' 2>/dev/null | head -1)
     if [ -z "$PAGE_WS" ]; then
-      logger -t "ytm/cookies" "[ytm/cookies] No active page target found on port 9222"
+      logger -t "ytm/cookies" "[ytm/cookies] No active page target found on port $PORT"
     else
       logger -t "ytm/cookies" "[ytm/cookies] Found page WebSocket target: $PAGE_WS"
     fi
 
     if [ -n "$PAGE_WS" ]; then
-      DEV_PATH=$(echo "$PAGE_WS" | sed 's|ws://127.0.0.1:9222||')
+      DEV_PATH=$(echo "$PAGE_WS" | sed "s|ws://127.0.0.1:$PORT||")
       REQ='{"id":1,"method":"Network.getCookies","params":{"urls":["https://music.youtube.com"]}}'
       LEN=${#REQ}
       logger -t "ytm/cookies" "[ytm/cookies] Querying Network.getCookies via nc to DEV_PATH=$DEV_PATH"
       JSON=$( (
         printf "GET %s HTTP/1.1\r\n" "$DEV_PATH"
-        printf "Host: 127.0.0.1:9222\r\n"
+        printf "Host: 127.0.0.1:%s\r\n" "$PORT"
         printf "Upgrade: websocket\r\n"
         printf "Connection: Upgrade\r\n"
         printf "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -148,7 +155,7 @@ extract_cookies() {   # $1=browser id
         sleep 0.2
         printf "\x81\\x$(printf '%02x' $((LEN | 128)))\x00\x00\x00\x00%s" "$REQ"
         sleep 0.3
-      ) | timeout 2 nc 127.0.0.1 9222 2>/dev/null | strings | grep "cookies" || true )
+      ) | timeout 2 nc 127.0.0.1 "$PORT" 2>/dev/null | strings | grep "cookies" || true )
 
       logger -t "ytm/cookies" "[ytm/cookies] NC response length=${#JSON}"
       if echo "$JSON" | grep -q "result"; then
@@ -168,7 +175,7 @@ extract_cookies() {   # $1=browser id
 
   if [ "$cdp_done" -eq 1 ]; then
     cp "$RAW" "$OUT"
-    LOG="CDP extraction successful via port 9222"
+    LOG="CDP extraction successful via CDP port $PORT"
     # Close debug browser instance and clean up its profile directory
     pkill -9 -f "yt-music/profiles/$browser" 2>/dev/null || true
     rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/yt-music/profiles/$browser" 2>/dev/null
@@ -214,6 +221,8 @@ extract_cookies() {   # $1=browser id
     KEPT=$(grep -vc '^#' "$OUT" 2>/dev/null || echo 0)
   fi
   rm -rf "$TMPD"
+  # Files created before this fix may still be world-readable.
+  [ -f "$OUT" ] && chmod 600 "$OUT"
   echo "DIR=$OUT_DIR"
   echo "RAW=$RAW"
   echo "OUT=$OUT"

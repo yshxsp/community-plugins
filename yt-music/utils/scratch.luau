@@ -1,9 +1,11 @@
--- Shared scratch-file slots under /tmp/yt-music.
+-- Shared scratch-file slots under the private runtime dir.
 -- One mkdir at load, then a small rotating pool of reusable names: concurrent
 -- requests get distinct slots, the next caller overwrites, nothing accumulates.
 
 local Scratch = {}
-Scratch.DIR = "/tmp/yt-music"
+-- Private per-user runtime dir (tmpfs, 0700), shared with scripts/mpv.sh.
+local RUNTIME = noctalia.getenv("XDG_RUNTIME_DIR")
+Scratch.DIR = ((RUNTIME and RUNTIME ~= "") and RUNTIME or "/tmp") .. "/yt-music"
 
 noctalia.mkdirAll(Scratch.DIR)
 

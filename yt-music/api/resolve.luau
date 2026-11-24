@@ -15,16 +15,21 @@ local thumbs = require("./thumbnails.luau")
 local get_thumbnail_path = thumbs.get_thumbnail_path
 
 local types = require("../utils/types.luau")
+local stats = require("./stats.luau")
 local network = require("../utils/network.luau")
 
 local function build_resolve_argv(safe_id: string): { string }
+	-- yt-dlp's own client selection: the old forced mweb,web clients are
+	-- SABR-only now and fell back to format 18 (360p video, ~22 kbps AAC).
+	-- One extraction yields the stream URL (last line) plus view/like counts
+	-- and duration, so playback never needs a second yt-dlp run for stats.
 	local argv = {
 		"yt-dlp",
-		"--extractor-args",
-		"youtube:player_client=mweb,web",
 		"-f",
 		"bestaudio/best",
 		"-g",
+		"--print",
+		"STATS=%(view_count)s|%(like_count)s|%(duration)s",
 		"--no-playlist",
 		"--no-warnings",
 	}
@@ -46,6 +51,13 @@ end
 local EXPO = {}
 
 local stream_cache = {}
+-- Track length in seconds from the last resolve, for callers that must know
+-- whether mpv's cache can hold the whole file.
+local stream_durations: { [string]: number? } = {}
+
+function EXPO.stream_duration(video_id: string): number?
+	return stream_durations[video_id]
+end
 local resolving_in_flight = {}
 local attempt_resolve: (string, number) -> () -- forward: resolve_stream parks the list, attempt spawns
 local STREAM_DISK_TTL = 4 * 3600
@@ -60,6 +72,14 @@ function EXPO.get_audio_cache_path(video_id: string): string?
 		return path
 	end
 	return nil
+end
+
+-- Final and in-progress paths for an mpv cache dump. The partial lives in a
+-- dot-directory so the .opus scan of AUDIO_DIR never sees half-written files.
+function EXPO.audio_cache_paths(video_id: string): (string, string)
+	local safe_id = video_id:gsub("[^%w%-_]", "_")
+	noctalia.mkdirAll(AUDIO_DIR .. "/.partial")
+	return AUDIO_DIR .. "/" .. safe_id .. ".opus", AUDIO_DIR .. "/.partial/" .. safe_id .. ".opus"
 end
 
 function EXPO.get_cached_audio_ids(callback)
@@ -96,7 +116,7 @@ function EXPO.cache_audio(video_id, callback)
 	end
 
 	noctalia.mkdirAll(AUDIO_DIR)
-	local argv = { "yt-dlp", "--extractor-args", "youtube:player_client=mweb,web", "-f", "bestaudio/best", "-o", path }
+	local argv = { "yt-dlp", "-f", "bestaudio/best", "-o", path }
 	if noctalia.fileExists(COOKIE_PATH) then
 		table.insert(argv, "--cookies")
 		table.insert(argv, COOKIE_PATH)
@@ -196,6 +216,11 @@ attempt_resolve = function(video_id, attempt)
 		local callbacks = resolving_in_flight[video_id] or {}
 		resolving_in_flight[video_id] = nil
 
+		local views, likes, duration = out:match("STATS=(%d*)|(%d*)|([%d%.]*)")
+		if views then
+			stats.store_stats(video_id, tonumber(views) or 0, tonumber(likes) or 0)
+			stream_durations[video_id] = tonumber(duration)
+		end
 		if url ~= "" then
 			log("stream resolved successfully (" .. #url .. " bytes, " .. elapsed_ms .. "ms) for id=" .. video_id)
 			stream_cache[video_id] = { url = url, timestamp = os.time() }
@@ -218,6 +243,9 @@ attempt_resolve = function(video_id, attempt)
 				reason = "superseded (stale fetch reaped)"
 			end
 			log("stream resolution " .. reason .. " (" .. elapsed_ms .. "ms) for id=" .. video_id)
+			if reason == "failed" or reason == "timed out" then
+				network.reportFailure()
+			end
 			for _, callback in ipairs(callbacks) do
 				if callback then
 					callback(nil)

@@ -345,6 +345,10 @@ local function render_mini()
 	}))
 end
 
+-- A closed panel keeps its runtime and watchers alive; rebuilding its UI tree
+-- for every snapshot nobody can see is wasted work, so renders wait for onOpen.
+local visible = false
+
 local function apply_state(s)
 	if type(s) ~= "table" then
 		return
@@ -366,20 +370,44 @@ local function apply_state(s)
 	if type(s.liked_ids) == "table" then
 		state.liked_ids = s.liked_ids
 	end
-	render_mini()
+	if visible then
+		render_mini()
+	end
+end
+
+local TICK = "yt_music.tick"
+
+-- Once-a-second position (and bitrate) updates from the service.
+local function apply_tick(t)
+	if type(t) ~= "table" or t.id ~= state.player.id then
+		return
+	end
+	state.player.position = t.position
+	state.player.bitrate = t.bitrate
+	if visible then
+		render_mini()
+	end
 end
 
 function onOpen(_context)
+	visible = true
 	theme.corner_radius_scale = noctalia.getSetting("shell.corner_radius_scale") or 1.0
 	theme.radius = 12 * theme.corner_radius_scale
 	local curr = noctalia.state.get(STATE)
 	if curr then
 		apply_state(curr)
 	end
+	apply_tick(noctalia.state.get(TICK))
+	render_mini()
+end
+
+function onClose()
+	visible = false
 end
 
 if noctalia.state and noctalia.state.watch then
 	noctalia.state.watch(STATE, apply_state)
+	noctalia.state.watch(TICK, apply_tick)
 	local curr = noctalia.state.get(STATE)
 	if curr then
 		apply_state(curr)
