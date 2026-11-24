@@ -8,7 +8,7 @@ playback with full transport controls, offline caching, and session restore.
 
 | Field | Value |
 | --- | --- |
-| ID | `aabidk20/yt-music` |
+| ID | `yshxsp/yt-music` |
 | Entries | Bar widget: `widget`; panels: `mini`, `panel`; service: `service` |
 
 ## Requirements
@@ -31,8 +31,8 @@ miniplayer, right click opens the full panel, middle click opens the plugin
 settings). You can also toggle any entry with its IPC command:
 
 ```sh
-noctalia msg panel-toggle aabidk20/yt-music:mini
-noctalia msg panel-toggle aabidk20/yt-music:panel
+noctalia msg panel-toggle yshxsp/yt-music:mini
+noctalia msg panel-toggle yshxsp/yt-music:panel
 ```
 
 The full panel groups everything: a home feed with Quick Picks, recommended
@@ -74,10 +74,10 @@ stream, thumbnail, and playlist caches are sized and clearable in Settings.
 The service exposes actions via `noctalia msg` using the plugin state channel:
 
 ```sh
-noctalia msg plugin aabidk20/yt-music:<entry-id> all <action> [payload]
+noctalia msg plugin yshxsp/yt-music:<entry-id> all <action> [payload]
 ```
 
-The bar widget also opens entries directly (`panel-toggle aabidk20/yt-music:mini` and `aabidk20/yt-music:panel`).
+The bar widget also opens entries directly (`panel-toggle yshxsp/yt-music:mini` and `yshxsp/yt-music:panel`).
 
 ## Notes
 

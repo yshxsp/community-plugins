@@ -120,7 +120,7 @@ local function build_settings()
 					variant = "outline",
 					controlSize = "sm",
 					onClick = function()
-						noctalia.openSettings("aabidk20/yt-music")
+						noctalia.openSettings("yshxsp/yt-music")
 					end,
 				}),
 			}

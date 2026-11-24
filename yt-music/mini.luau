@@ -96,7 +96,7 @@ local function render_mini()
 				variant = "primary",
 				controlSize = "md",
 				onClick = function()
-					noctalia.togglePanel("aabidk20/yt-music:panel")
+					noctalia.togglePanel("yshxsp/yt-music:panel")
 				end,
 			}),
 		}))
@@ -200,7 +200,7 @@ local function render_mini()
 							variant = "ghost",
 							controlSize = "sm",
 							onClick = function()
-								noctalia.togglePanel("aabidk20/yt-music:panel")
+								noctalia.togglePanel("yshxsp/yt-music:panel")
 							end,
 						}),
 					}
@@ -320,7 +320,7 @@ local function render_mini()
 			variant = "ghost",
 			controlSize = "sm",
 			onClick = function()
-				noctalia.openSettings("aabidk20/yt-music")
+				noctalia.openSettings("yshxsp/yt-music")
 			end,
 		})
 	)
