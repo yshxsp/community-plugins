@@ -27,6 +27,12 @@ mpv_ticks() {
   done
   echo "$total"
 }
+mpv_rss_kb() {
+  local p
+  p=$(pgrep -f 'input-ipc-server=.*yt-music/mpv[.]sock' | head -1)
+  [ -n "$p" ] && awk '/^VmRSS/ {print $2}' "/proc/$p/status" || echo 0
+}
+mpv_alive() { pgrep -f 'input-ipc-server=.*yt-music/mpv[.]sock' >/dev/null; }
 msg() { noctalia msg "$@" >/dev/null; }
 
 measure() {   # $1=label
@@ -37,8 +43,8 @@ measure() {   # $1=label
   s1=$(ticks "$noc" self); c1=$(ticks "$noc" children); m1=$(mpv_ticks)
   local launches
   launches=$(grep -c . "$cache/bench-spawns.log" || true)
-  printf '%-8s %-9s noctalia_self=%5d ms  noctalia_children=%5d ms  mpv=%5d ms  plugin_launches=%3d\n' \
-    "$rev_label" "$1" $(( (s1 - s0) * 1000 / hz )) $(( (c1 - c0) * 1000 / hz )) $(( (m1 - m0) * 1000 / hz )) "$launches"
+  printf '%-8s %-6s noctalia_self=%5d ms  noctalia_children=%5d ms  mpv=%5d ms  mpv_rss=%6d kB  plugin_launches=%3d\n' \
+    "$rev_label" "$1" $(( (s1 - s0) * 1000 / hz )) $(( (c1 - c0) * 1000 / hz )) $(( (m1 - m0) * 1000 / hz )) "$(mpv_rss_kb)" "$launches"
   cut -f2,3 "$cache/bench-spawns.log" | cut -c1-60 | sort | uniq -c | sort -rn | sed 's/^/           /' | head -6
 }
 
@@ -56,7 +62,15 @@ for rev in "$@"; do
   msg panel-toggle "$id:panel"; sleep 2; msg panel-toggle "$id:panel"; sleep 1
   msg panel-toggle "$id:mini"; sleep 2; msg panel-toggle "$id:mini"; sleep 1
   msg plugin "$id:service" all replace_queue_and_play "@$queue"
-  sleep 25
+  sleep 12
+  # The upstream revision kills mpv on the 403 a fresh stream URL returns for
+  # its first seconds; by now the URL is warm, so start it again.
+  if ! mpv_alive; then
+    echo "$rev_label: playback died on start (fresh-URL 403), restarting"
+    msg plugin "$id:service" all replace_queue_and_play "@$queue"
+  fi
+  sleep 20
+  mpv_alive || echo "$rev_label: mpv not running"
   measure play
 
   msg panel-toggle "$id:mini"; sleep 2

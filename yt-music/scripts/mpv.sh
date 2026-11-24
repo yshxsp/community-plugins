@@ -61,13 +61,20 @@ mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file $5=cache_path
   stop_previous TERM
   # 9>&-: mpv must not inherit the lock fd, or the lock would outlive this
   # script (held open by the playing mpv) and deadlock the next play.
+  # Headless audio: none of mpv's built-in UI scripts (7 fewer threads; the
+  # OSC alone woke 19 times a second), no ytdl_hook (it re-ran yt-dlp on every
+  # failed googlevideo open), and a 200 ms pipewire buffer instead of one
+  # quantum (-33% wake-ups). User scripts such as mpv-mpris still load.
   nohup mpv "$DUMMY" "$url" "$DUMMY" --playlist-start=1 \
-    --no-video --vo=null --vd=null --audio-display=no --no-osc --no-osd-bar \
+    --no-video --vo=null --vd=null --audio-display=no --osc=no --no-osd-bar \
+    --load-stats-overlay=no --load-console=no --load-auto-profiles=no \
+    --load-select=no --load-positioning=no --load-commands=no \
+    --load-context-menu=no --ytdl=no \
     --demuxer-max-bytes=20M --demuxer-readahead-secs=60 --really-quiet --no-terminal \
     --keep-open=always --pause=no --volume="$vol" \
     --force-media-title="$title" \
     --script="$SCRIPT" "${extra[@]}" \
-    --input-ipc-server="$SOCK" --ao=pipewire,pulse,alsa,auto \
+    --input-ipc-server="$SOCK" --ao=pipewire,pulse,alsa,auto --pipewire-buffer=200 \
     >/dev/null 2>&1 9>&- &
   echo $! > "$PIDFILE"
   local i
