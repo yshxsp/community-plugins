@@ -4,8 +4,9 @@
 -- socket, so the plugin keeps one idle `nc` connection instead of a shell loop
 -- that polled mpv every second:
 --   * observed properties are forwarded as {event="property-change",...};
---   * time-pos goes out once a second as {request_id=100}, audio-bitrate every
---     tenth tick as {request_id=200}; the timer stops while paused;
+--   * time-pos goes out once a second, just after each whole second of the
+--     position, as {request_id=100}, audio-bitrate every tenth tick as
+--     {request_id=200}; no ticks while paused;
 --   * `script-message ytm-sync` re-sends every observed value (the plugin
 --     connects after mpv has started and would miss the first notifications).
 --
@@ -112,11 +113,16 @@ mp.register_script_message("ytm-sync", function()
 	end
 end)
 
+-- Position ticks are aligned to whole seconds of time-pos: each one fires
+-- ~0.1 s after the position crosses the next second. A free-running 1 s timer
+-- drifted to an arbitrary phase; near x.98 the ±0.02 s jitter of time-pos made
+-- the plugin's floor()ed clock skip a second (0:14 -> 0:16) and later repeat
+-- one, and every pause/resume reset the phase and could drop a second.
+local PAST_SECOND = 0.1
 local ticks = 0
-local timer = mp.add_periodic_timer(1, function()
-	if not on_track() then
-		return
-	end
+local tick_timer = nil
+
+local function send_tick()
 	local pos = mp.get_property_number("time-pos")
 	if pos then
 		emit({ request_id = 100, data = pos })
@@ -128,14 +134,57 @@ local timer = mp.add_periodic_timer(1, function()
 		end
 	end
 	ticks = ticks + 1
+end
+
+local schedule_tick
+
+local function on_tick()
+	tick_timer = nil
+	if on_track() then
+		send_tick()
+	end
+	schedule_tick()
+end
+
+schedule_tick = function()
+	if tick_timer then
+		tick_timer:kill()
+		tick_timer = nil
+	end
+	if mp.get_property_bool("pause") then
+		return
+	end
+	local delay = 1
+	local pos = mp.get_property_number("time-pos")
+	if pos then
+		local speed = mp.get_property_number("speed") or 1
+		delay = (math.floor(pos) + 1 + PAST_SECOND - pos) / (speed > 0 and speed or 1)
+	end
+	tick_timer = mp.add_timeout(delay, on_tick)
+end
+
+-- On pause, report the exact stop position: a pause landing between a second
+-- boundary and its tick would otherwise show the previous second while paused
+-- and skip the current one on resume.
+mp.observe_property("pause", "bool", function(_, paused)
+	if paused and on_track() then
+		local pos = mp.get_property_number("time-pos")
+		if pos then
+			emit({ request_id = 100, data = pos })
+		end
+	end
+	schedule_tick()
 end)
 
-mp.observe_property("pause", "bool", function(_, paused)
-	if paused then
-		timer:kill()
-	else
-		timer:resume()
+-- After a seek or a track start: report the new position at once and re-align.
+mp.register_event("playback-restart", function()
+	if on_track() and not mp.get_property_bool("pause") then
+		local pos = mp.get_property_number("time-pos")
+		if pos then
+			emit({ request_id = 100, data = pos })
+		end
 	end
+	schedule_tick()
 end)
 
 if opts.cache ~= "" and opts.partial ~= "" then
