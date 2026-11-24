@@ -48,7 +48,7 @@ stop_previous() {   # $1=signal
   rm -f "$SOCK"
 }
 
-mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file $5=cache_path $6=partial_path
+mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file $5=cache_path $6=partial_path $7=cache MiB
   local vol="${1:-100}" url="" title="" t0="$EPOCHREALTIME"
   read -r url < "$2" || true
   IFS= read -r title < "$3" 2>/dev/null || true
@@ -70,7 +70,7 @@ mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file $5=cache_path
     --load-stats-overlay=no --load-console=no --load-auto-profiles=no \
     --load-select=no --load-positioning=no --load-commands=no \
     --load-context-menu=no --ytdl=no \
-    --demuxer-max-bytes=20M --demuxer-readahead-secs=60 --really-quiet --no-terminal \
+    --demuxer-max-bytes="${7:-20}M" --demuxer-readahead-secs=60 --really-quiet --no-terminal \
     --keep-open=always --pause=no --volume="$vol" \
     --force-media-title="$title" \
     --script="$SCRIPT" "${extra[@]}" \

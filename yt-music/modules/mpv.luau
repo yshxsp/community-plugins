@@ -10,11 +10,19 @@ local log = logger.module("ytm", "mpv")
 Mpv.SOCK = scratch.DIR .. "/mpv.sock"
 
 -- ncat closes the connection on stdin EOF unless told not to; OpenBSD nc
--- keeps reading the socket but needs -N to exit after a one-shot send. The
--- boot health check records which one is installed.
+-- keeps reading the socket but needs -N to exit after a one-shot send. Use the
+-- health check's verdict when it has run (it is on demand now); otherwise the
+-- declared dependency (openbsd `nc`), unless only `ncat` is installed.
 local function is_ncat()
 	local nc = type(store.state.health) == "table" and store.state.health.nc
-	return type(nc) == "table" and nc.detail == "ncat"
+	if type(nc) == "table" then
+		return nc.detail == "ncat"
+	end
+	return not noctalia.commandExists("nc") and noctalia.commandExists("ncat")
+end
+
+local function nc_bin()
+	return noctalia.commandExists("nc") and "nc" or "ncat"
 end
 
 -- One process per command: sh feeds the JSON line from a here-document and
@@ -28,7 +36,7 @@ function Mpv.send(payload_json)
 	proc.runAsync({
 		"sh",
 		"-c",
-		"exec nc " .. flags .. ' "$1" <<EOF\n$2\nEOF',
+		"exec " .. nc_bin() .. " " .. flags .. ' "$1" <<EOF\n$2\nEOF',
 		"sh",
 		Mpv.SOCK,
 		payload_json,
@@ -38,7 +46,7 @@ end
 -- url/title go through per-call scratch slots (rotating pool, overwritten on
 -- reuse) so a fast track switch can never clobber the previous launch inputs.
 -- cache_path/partial_path ask ytm.lua to save the track from mpv's cache.
-function Mpv.play(url, title, volume, on_ready, cover_path, cache_path, partial_path)
+function Mpv.play(url, title, volume, on_ready, cover_path, cache_path, partial_path, cache_mib)
 	local url_file = scratch.path("mpv-url")
 	local title_file = scratch.path("mpv-title")
 	noctalia.writeFile(url_file, url)
@@ -61,7 +69,8 @@ function Mpv.play(url, title, volume, on_ready, cover_path, cache_path, partial_
 		title_file,
 		cover_path or "",
 		cache_path or "",
-		partial_path or ""
+		partial_path or "",
+		tostring(cache_mib or 20)
 	)
 end
 
@@ -74,7 +83,9 @@ end
 -- pushes; it exits on its own when mpv dies and the socket closes.
 function Mpv.stream(on_line)
 	local keep_open = is_ncat() and "--no-shutdown -U" or "-U"
-	local cmd = "exec nc "
+	local cmd = "exec "
+		.. nc_bin()
+		.. " "
 		.. keep_open
 		.. " "
 		.. Bash.sh_quote(Mpv.SOCK)

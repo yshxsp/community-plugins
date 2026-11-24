@@ -230,8 +230,16 @@ end
 -- A spec sheet: name on the left, version or failure reason on the right.
 -- Returns nil until the first check has run.
 
+-- The dependency check is no longer run at every boot (yt-dlp --version alone
+-- is a ~250 ms Python start); the first time a page shows it, ask for it.
+local health_requested = false
+
 local function health_fill()
 	local h = state.data.health
+	if (type(h) ~= "table" or next(h) == nil) and not health_requested and state.data.checking_health ~= true then
+		health_requested = true
+		request("refresh_health")
+	end
 	if type(h) ~= "table" or next(h) == nil then
 		return nil
 	end

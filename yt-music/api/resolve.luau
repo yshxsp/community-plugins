@@ -1,4 +1,5 @@
 --!strict
+local timer = require("../utils/timer.luau")
 local proc = require("../utils/proc.luau")
 
 -- stream resolution, audio download/cache, track stats, prefetch.
@@ -262,7 +263,7 @@ attempt_resolve = function(video_id, attempt)
 		-- no handling: the net gate already scheduled its synthetic failure.
 		if attempt < 1 then
 			log("stream resolve launch refused for id=" .. video_id .. ", retrying")
-			local scheduled = proc.runAsync("sleep 1.5", function()
+			local scheduled = timer.after(1500, function()
 				if resolving_in_flight[video_id] then
 					attempt_resolve(video_id, attempt + 1)
 				end

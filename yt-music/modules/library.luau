@@ -1,4 +1,6 @@
+local timer = require("../utils/timer.luau")
 local proc = require("../utils/proc.luau")
+local network = require("../utils/network.luau")
 local store = require("./store.luau")
 local api = require("../api.luau")
 local logger = require("../utils/log.luau")
@@ -51,7 +53,7 @@ function Library.save_offline_meta()
 		return
 	end
 	save_meta_pending = true
-	proc.runAsync("true", function()
+	timer.defer(function()
 		save_meta_pending = false
 		local ok, encoded = pcall(noctalia.json.encode, state.offline_meta)
 		if ok and encoded then
@@ -92,7 +94,7 @@ function Library.save_cached_meta()
 		return
 	end
 	save_cached_meta_pending = true
-	proc.runAsync("true", function()
+	timer.defer(function()
 		save_cached_meta_pending = false
 		local ok, encoded = pcall(noctalia.json.encode, cached_meta)
 		if ok and encoded then
@@ -165,9 +167,10 @@ function Library.resolve_missing_meta(vids: { string })
 		local vid = vids[idx]
 		idx = idx + 1
 		local url = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=" .. vid .. "&format=json"
-		proc.runAsync({ "curl", "-s", "--max-time", "5", url }, function(res)
-			if type(res) == "table" and res.stdout and res.stdout ~= "" then
-				local data = noctalia.json.decode(res.stdout)
+		-- In-process request instead of a curl process per track.
+		local accepted = network.http({ url = url }, function(res)
+			if type(res) == "table" and res.ok and res.body and res.body ~= "" then
+				local data = noctalia.json.decode(res.body)
 				if type(data) == "table" and data.title then
 					local title = tostring(data.title)
 					local author = tostring(data.author_name or ""):gsub("%s*-%s*Topic$", "")
@@ -197,8 +200,11 @@ function Library.resolve_missing_meta(vids: { string })
 					end
 				end
 			end
-			proc.runAsync("sleep 0.2", next_vid)
+			timer.after(200, next_vid)
 		end)
+		if not accepted then
+			timer.after(200, next_vid)
+		end
 	end
 
 	next_vid()
@@ -425,7 +431,7 @@ function Library.audit_downloaded_playlists()
 			finalize()
 			return
 		end
-		proc.runAsync("true", function()
+		timer.defer(function()
 			pcall(function()
 				local tracks = api.load_cached_playlist(sources[idx])
 				if tracks and #tracks > 0 then

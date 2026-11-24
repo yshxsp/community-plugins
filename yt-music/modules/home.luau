@@ -1,3 +1,4 @@
+local timer = require("../utils/timer.luau")
 local proc = require("../utils/proc.luau")
 local store = require("./store.luau")
 local api = require("../api.luau")
@@ -44,7 +45,7 @@ function Home.fetch_home_thumbs()
 		end
 	end
 	if #combined > 0 then
-		proc.runAsync("true", function()
+		timer.defer(function()
 			api.ensure_thumbnails(combined, store.publish, "home")
 		end)
 	end

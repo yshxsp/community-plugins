@@ -3,6 +3,7 @@ local STATE_KEY = "yt_music.state"
 local theme = require("./utils/theme.luau")
 local state = require("./views/state.luau")
 local rerender = require("./views/rerender.luau")
+local timer = require("./utils/timer.luau")
 local sidebar_comp = require("./views/components/sidebar.luau")
 local playerbar_comp = require("./views/components/playerbar.luau")
 local auth_comp = require("./views/components/auth.luau")
@@ -159,3 +160,9 @@ if noctalia.state and noctalia.state.watch then
 end
 
 render_panel()
+
+-- Drives utils/timer.luau (search debounce, UI delays) for this entry.
+function update()
+	timer.tick()
+end
+timer.tick()

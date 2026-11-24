@@ -1,3 +1,4 @@
+local timer = require("../utils/timer.luau")
 local proc = require("../utils/proc.luau")
 local store = require("./store.luau")
 
@@ -75,7 +76,7 @@ function Cache.fetch_stats()
 	state.refreshing_cache_stats = true
 	store.publish()
 
-	proc.runAsync("sleep 0.25", function()
+	timer.after(250, function()
 		local intentional = get_intentional()
 		local total_audio = 0
 		local dl_bytes = 0

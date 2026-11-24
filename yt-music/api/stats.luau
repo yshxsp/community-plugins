@@ -10,7 +10,11 @@ local const = require("./constants.luau")
 local STATS_CACHE_PATH = const.STATS_CACHE_PATH
 local COOKIE_PATH = const.COOKIE_PATH
 
-local STATS_TTL = 24 * 3600
+-- Counts are refreshed by every stream resolve (same yt-dlp run), so a stale
+-- entry is still served as-is: it only matters for tracks played from the
+-- offline cache, where a fresh yt-dlp run (~1.7 s CPU) just for two numbers
+-- is not worth it. Entries are kept for 30 days.
+local STATS_KEEP = 30 * 24 * 3600
 
 local EXPO = {}
 
@@ -46,7 +50,7 @@ local function save_cache()
 	local data = {}
 	local now = os.time()
 	for id, entry in pairs(stats_cache) do
-		if (now - entry.timestamp) < STATS_TTL then
+		if (now - entry.timestamp) < STATS_KEEP then
 			data[id] = { views = entry.views, likes = entry.likes, fetched = entry.timestamp }
 		else
 			stats_cache[id] = nil
@@ -77,7 +81,7 @@ function EXPO.track_stats(video_id: string, cb: ((number, number) -> ())?)
 	load_cache()
 
 	local cached = stats_cache[video_id]
-	if cached and (os.time() - cached.timestamp) < STATS_TTL then
+	if cached then
 		if cb then
 			cb(cached.views, cached.likes)
 		end

@@ -1,3 +1,4 @@
+local timer = require("../utils/timer.luau")
 local proc = require("../utils/proc.luau")
 local Player = {}
 
@@ -53,8 +54,17 @@ local function kill_stale_resolves(done)
 	end
 end
 
--- Opus at ~140 kbps: 20 MiB of demuxer cache holds about 19 minutes.
-local MAX_DUMP_SECONDS = 18 * 60
+-- The demuxer cache must hold the whole track for the offline dump. Size it
+-- from the track length at 24 KB/s (opus 251 peaks near 160 kbps), between
+-- the old fixed 20 MiB and 64 MiB; beyond that (~45 min) yt-dlp downloads.
+local BYTES_PER_SECOND = 24 * 1024
+local MIN_CACHE_MIB, MAX_CACHE_MIB = 20, 64
+local MAX_DUMP_SECONDS = 45 * 60
+
+local function cache_mib_for(seconds: number): number
+	local mib = math.ceil(seconds * BYTES_PER_SECOND / 1048576)
+	return math.max(MIN_CACHE_MIB, math.min(MAX_CACHE_MIB, mib))
+end
 -- Track whose offline copy ytm.lua is expected to dump; cleared once handled.
 local pending_cache_item = nil
 -- Set while ytm.lua writes the dump, so a natural end of a short track does not
@@ -127,6 +137,7 @@ local function player_set(item, stream_url)
 	-- it is fully buffered (no second download, no extra yt-dlp run). Tracks
 	-- too long for the 20 MiB cache, and dumps that fail, fall back to yt-dlp.
 	local cache_path, partial_path = nil, nil
+	local cache_mib = MIN_CACHE_MIB
 	pending_cache_item = nil
 	dump_in_progress = false
 	if item.id and item.id ~= "" and stream_url:sub(1, 1) ~= "/" then
@@ -135,6 +146,7 @@ local function player_set(item, stream_url)
 			cache_with_ytdlp(item)
 		else
 			cache_path, partial_path = api.audio_cache_paths(item.id)
+			cache_mib = cache_mib_for(dur)
 			pending_cache_item = item
 		end
 	end
@@ -143,7 +155,7 @@ local function player_set(item, stream_url)
 		if ready then
 			start_stream()
 		end
-	end, state.player.thumb_path, cache_path, partial_path) -- cached art -> mpris:artUrl via mpv-mpris
+	end, state.player.thumb_path, cache_path, partial_path, cache_mib) -- cached art -> mpris:artUrl via mpv-mpris
 	-- Speculative work happens only for settled playback: the song that
 	-- actually starts earns its next-track prefetch and queue thumbnails.
 	-- Skipped-over intents never get here, so rapid skipping spawns nothing
@@ -161,12 +173,12 @@ local function player_set(item, stream_url)
 		end
 	end
 	if api and api.ensure_thumbnails then
-		proc.runAsync("true", function()
+		timer.defer(function()
 			api.ensure_thumbnails(state.player.queue, publish, "queue")
 		end)
 	end
 	if api and api.save_session then
-		proc.runAsync("true", function()
+		timer.defer(function()
 			api.save_session(state.player)
 		end)
 	end
@@ -525,7 +537,7 @@ queue_skip = function(dir)
 	pending_steps = pending_steps + dir
 	skip_nonce = skip_nonce + 1
 	local my = skip_nonce
-	local scheduled = proc.runAsync("sleep 0.25", function()
+	local scheduled = timer.after(250, function()
 		if my ~= skip_nonce then
 			return
 		end

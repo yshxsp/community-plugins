@@ -1,3 +1,4 @@
+local timer = require("./timer.luau")
 local proc = require("./proc.luau")
 -- Global network gate ("middleware"): every outbound-capable launch goes
 -- through here. When offline, calls are refused BEFORE spawning and callers
@@ -31,7 +32,7 @@ end
 function Net.runAsync(cmd, cb, timeout, tag)
 	if not online then
 		if cb then
-			proc.runAsync("true", function()
+			timer.defer(function()
 				cb(synthetic_result())
 			end)
 		end
@@ -67,6 +68,15 @@ function Net.http(req, cb)
 		end
 		cb(resp)
 	end)
+end
+
+-- In-process download to a file; offline answers cb(false) without trying.
+function Net.download(url, dest, cb)
+	if not online then
+		cb(false)
+		return false
+	end
+	return proc.download(url, dest, cb)
 end
 
 -- One in-process request (no curl): true when YouTube Music answers at all.

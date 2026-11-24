@@ -1,4 +1,5 @@
 local proc = require("./utils/proc.luau")
+local timer = require("./utils/timer.luau")
 local REQ_KEY = "yt_music.request"
 
 local api = require("./api.luau")
@@ -105,7 +106,16 @@ local ACTIONS = {
 		playlist.play(r.id or r.playlist_id, r.title)
 	end,
 	open_playlist = function(r)
-		playlist.open(r.id or r.playlist_id, r.title)
+		local pid = r.id or r.playlist_id
+		playlist.open(pid, r.title)
+		-- Opening a playlist is a strong play intent: resolve its first track
+		-- ahead of the Play click once the track list has arrived.
+		timer.after(1500, function()
+			local first = state.playlist and state.playlist.tracks and state.playlist.tracks[1]
+			if first and tostring(state.playlist.id or "") == tostring(pid or "") and api.prefetch_track then
+				api.prefetch_track(first)
+			end
+		end)
 	end,
 	refresh_playlist = function(r)
 		playlist.refresh(r.id or r.playlist_id)
@@ -205,7 +215,7 @@ local ACTIONS = {
 	fetch_offline = function(r)
 		library.sync_audio_cache()
 		if api and api.ensure_thumbnails and type(state.offline_tracks) == "table" and #state.offline_tracks > 0 then
-			proc.runAsync("true", function()
+			timer.defer(function()
 				api.ensure_thumbnails(state.offline_tracks, store.publish, "offline")
 			end)
 		end
@@ -265,7 +275,7 @@ local ACTIONS = {
 					table.insert(items, pl)
 				end
 			end
-			proc.runAsync("true", function()
+			timer.defer(function()
 				api.ensure_thumbnails(items, store.publish, "artist")
 			end)
 		end)
@@ -289,7 +299,7 @@ noctalia.state.watch(REQ_KEY, function(req)
 
 	local handler = ACTIONS[action]
 	if handler then
-		proc.runAsync("true", function()
+		timer.defer(function()
 			local ok, err = pcall(handler, req)
 			if not ok then
 				log("request error in '" .. action .. "': " .. tostring(err))
@@ -309,7 +319,7 @@ local function drain_library()
 		if type(playlists) == "table" and #playlists > 0 then
 			state.library = playlists
 			log("ytmusic: loaded " .. #playlists .. " library playlists")
-			proc.runAsync("true", function()
+			timer.defer(function()
 				api.ensure_thumbnails(state.library, store.publish, "library")
 			end)
 		else
@@ -322,8 +332,7 @@ api.on_library_settled(drain_library)
 
 -- Connectivity: nothing runs while requests succeed. A transport failure
 -- (network.reportFailure) starts an in-process probe now and every 20 s until
--- YouTube Music answers again; then update() drops back to an hourly no-op.
-local IDLE_INTERVAL = 3600 * 1000
+-- YouTube Music answers again.
 local PROBE_INTERVAL = 20 * 1000
 local probing = false
 local probe_in_flight = false
@@ -337,7 +346,16 @@ local function set_online(now_online)
 	end
 end
 
-local function probe()
+local probe
+
+local function probe_loop()
+	if probing then
+		probe()
+		timer.after(PROBE_INTERVAL, probe_loop)
+	end
+end
+
+probe = function()
 	if probe_in_flight then
 		return
 	end
@@ -345,25 +363,22 @@ local function probe()
 	network.probe(function(up)
 		probe_in_flight = false
 		set_online(up)
-		if up and probing then
+		if up then
 			probing = false
-			noctalia.setUpdateInterval(IDLE_INTERVAL)
-		elseif not up and not probing then
+		elseif not probing then
 			probing = true
-			noctalia.setUpdateInterval(PROBE_INTERVAL)
+			timer.after(PROBE_INTERVAL, probe_loop)
 		end
 	end)
 end
 
 network.onFailure(probe)
 
+-- update() only drives utils/timer.luau; with no timer pending it runs hourly.
 function update()
-	if probing then
-		probe()
-	end
+	timer.tick()
 end
-
-noctalia.setUpdateInterval(IDLE_INTERVAL)
+timer.tick()
 
 log("boot: service started, api=" .. tostring(type(api)) .. " library=" .. tostring(type(api and api.library)))
 log_boot_env()
@@ -374,7 +389,7 @@ end
 mpv.kill()
 library.load_offline_meta()
 auth.detect_browsers()
-auth.check_health()
+-- auth.check_health() runs on demand (login page, Settings > Health).
 auth.load_cached_cookies()
 if api and api.load_cached_library then
 	local cached_lib = api.load_cached_library()
@@ -382,7 +397,7 @@ if api and api.load_cached_library then
 		state.library = cached_lib
 	end
 end
-proc.runAsync("true", function()
+timer.defer(function()
 	local const = require("./api/constants.luau")
 	if not noctalia.fileExists(const.COOKIE_PATH) then
 		-- Signed out (e.g. cookies cleared between runs): drop recently-played

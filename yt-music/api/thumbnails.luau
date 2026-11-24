@@ -5,7 +5,6 @@
 local const = require("./constants.luau")
 local THUMB_DIR = const.THUMB_DIR
 
-local scratch = require("../utils/scratch.luau")
 local network = require("../utils/network.luau")
 
 local EXPO = {}
@@ -66,29 +65,78 @@ end
 
 local path_for = EXPO.path_for
 
+-- Cover downloads run in-process (noctalia.download) instead of one curl per
+-- cover or per batch. At most DL_CONCURRENCY run at once; requests for the
+-- same file share one download; failures leave no partial file behind.
+local DL_CONCURRENCY = 8
+local dl_queue = {}
+local dl_active = 0
+local dl_waiters: { [string]: { (boolean) -> () } } = {}
+local known_thumb_files = {}
+
+local function dl_finish(path: string, ok: boolean)
+	if ok and noctalia.fileExists(path) then
+		known_thumb_files[path] = true
+	else
+		ok = false
+		if noctalia.fileExists(path) then
+			noctalia.removeFile(path)
+		end
+	end
+	local waiters = dl_waiters[path] or {}
+	dl_waiters[path] = nil
+	for _, cb in ipairs(waiters) do
+		cb(ok)
+	end
+end
+
+local function dl_pump()
+	while dl_active < DL_CONCURRENCY and #dl_queue > 0 do
+		local job = table.remove(dl_queue, 1)
+		dl_active = dl_active + 1
+		local accepted = network.download(job.url, job.path, function(ok)
+			dl_active = dl_active - 1
+			dl_finish(job.path, ok == true)
+			dl_pump()
+		end)
+		if not accepted then
+			dl_active = dl_active - 1
+			dl_finish(job.path, false)
+		end
+	end
+end
+
+local function fetch_cover(url: string, path: string, cb: (boolean) -> ())
+	if dl_waiters[path] then
+		table.insert(dl_waiters[path], cb)
+		return
+	end
+	dl_waiters[path] = { cb }
+	table.insert(dl_queue, { url = url, path = path })
+	noctalia.mkdirAll(THUMB_DIR)
+	dl_pump()
+end
+
 function EXPO.get_thumbnail_path(id: string, url: string?, callback: ((string) -> ())?): string?
 	if type(id) ~= "string" or id == "" then
 		return nil
 	end
 	local path = path_for(id, url)
 
-	if noctalia.fileExists(path) then
+	if known_thumb_files[path] or noctalia.fileExists(path) then
 		return path
 	end
 
 	if type(url) == "string" and url ~= "" then
-		noctalia.mkdirAll(THUMB_DIR)
-		network.runAsync({ "curl", "-s", "-L", "-o", path, url }, function()
-			if noctalia.fileExists(path) and callback then
+		fetch_cover(url, path, function(ok)
+			if ok and callback then
 				callback(path)
 			end
-		end, 10000)
+		end)
 	end
 
 	return nil
 end
-
-local known_thumb_files = {}
 
 local function preload_thumb_cache()
 	noctalia.mkdirAll(THUMB_DIR)
@@ -134,48 +182,32 @@ function EXPO.ensure_thumbnails(items, on_updated, tag)
 		return
 	end
 
-	local configFile = scratch.path("thumbcfg")
-	-- One config entry per unique output path: same-resource covers collapse
-	-- to a single download instead of one per track.
-	local lines = {}
-	local seen_paths = {}
+	-- One download per unique path; a single publish once the batch settles
+	-- (each publish copies the whole snapshot into every entry).
+	local by_path = {}
+	local pending = 0
 	for _, m in ipairs(missing) do
-		if not seen_paths[m.path] then
-			seen_paths[m.path] = true
-			-- curl -K config values: strip quotes/control chars so a hostile URL
-			-- cannot inject additional curl options via the config file
-			local safe_url = tostring(m.url):gsub('[%c"]', "")
-			table.insert(lines, string.format('output = "%s"\nurl = "%s"', m.path, safe_url))
+		if not by_path[m.path] then
+			by_path[m.path] = { url = m.url, items = {} }
+			pending = pending + 1
 		end
+		table.insert(by_path[m.path].items, m.item)
 	end
-	noctalia.writeFile(configFile, table.concat(lines, "\n"))
-
-	noctalia.mkdirAll(THUMB_DIR)
-	if not noctalia.commandExists("curl") then
-		return
-	end
-
-	network.runAsync(
-		{ "curl", "-s", "--parallel", "--parallel-max", "16", "--parallel-immediate", "-K", configFile },
-		function(_res)
-			-- curl reports a single failed transfer as a non-zero exit, but every
-			-- transfer that did complete is already on disk. Attach whatever
-			-- landed instead of discarding the batch: one unreachable cover used
-			-- to leave every newly fetched item without artwork.
-			local attached = false
-			for _, m in ipairs(missing) do
-				if noctalia.fileExists(m.path) then
-					known_thumb_files[m.path] = true
-					m.item.thumb_path = m.path
-					attached = true
+	local attached = updated_cached
+	for path, entry in pairs(by_path) do
+		fetch_cover(entry.url, path, function(ok)
+			if ok then
+				for _, item in ipairs(entry.items) do
+					item.thumb_path = path
 				end
+				attached = true
 			end
-			if attached and type(on_updated) == "function" then
+			pending = pending - 1
+			if pending == 0 and attached and type(on_updated) == "function" then
 				on_updated()
 			end
-		end,
-		15000
-	)
+		end)
+	end
 end
 
 function EXPO.attach_cached_thumbs(items: { { [string]: any } })

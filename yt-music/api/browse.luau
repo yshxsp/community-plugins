@@ -35,7 +35,12 @@ local library_hook: (() -> ())? = nil
 
 -- The service drains the result through finish_library as soon as a fetch
 -- settles, instead of polling library_pending() every second.
+-- One library fetch at a time: boot and the cached-cookie restore both start
+-- one; the second would only repeat the same pages.
+local library_in_flight = false
+
 local function settle_library(value: any)
+	library_in_flight = false
 	pending_library = value
 	if library_hook then
 		library_hook()
@@ -54,6 +59,11 @@ function EXPO.library()
 		log("library: skipped network call because offline")
 		return
 	end
+	if library_in_flight then
+		log("library: fetch already in flight, joining it")
+		return
+	end
+	library_in_flight = true
 	log("library called")
 	local tmp_raw = scratch.path("lib-raw")
 	local raw_pls = {}
@@ -157,6 +167,34 @@ function EXPO.finish_library(cb: (any?, string?) -> ()?)
 	end
 end
 
+-- Track radios (RDAMVM<videoId>, added to the home mixes) are watch
+-- playlists: `browse` returns nothing for them, `next` lists ~50 tracks.
+local function radio_page(video_id: string, cb: (types.PlaylistPageResult?, string?) -> ())
+	local tmp_raw = scratch.path("radio-raw")
+	local req = { context = CONTEXT.context, videoId = video_id, playlistId = "RDAMVM" .. video_id }
+	it.innerTube("next", req, function(raw_body, _err)
+		if not raw_body or raw_body == "" then
+			cb({ tracks = {}, next_token = nil })
+			return
+		end
+		noctalia.writeFile(tmp_raw, raw_body)
+		network.runAsync({ "jq", filters.RADIO_PAGE, tmp_raw }, function(res)
+			local data = noctalia.json.decode((type(res) == "table" and res.stdout) or "")
+			local seen, tracks = {}, {}
+			if type(data) == "table" and type(data.tracks) == "table" then
+				for _, tr in ipairs(data.tracks) do
+					if not seen[tr.id] then
+						seen[tr.id] = true
+						table.insert(tracks, tr)
+					end
+				end
+			end
+			attach_cached_thumbs(tracks)
+			cb({ tracks = tracks, next_token = nil })
+		end, 15000)
+	end, true)
+end
+
 function EXPO.playlist_page(
 	playlist_id: string?,
 	continuation_token: string?,
@@ -164,6 +202,15 @@ function EXPO.playlist_page(
 )
 	if type(playlist_id) ~= "string" or playlist_id == "" then
 		cb({ tracks = {}, next_token = nil })
+		return
+	end
+	local radio_vid = playlist_id:match("^V?L?RDAMVM([%w%-_]+)$")
+	if radio_vid then
+		if continuation_token and continuation_token ~= "" then
+			cb({ tracks = {}, next_token = nil })
+		else
+			radio_page(radio_vid, cb)
+		end
 		return
 	end
 	local pid = sanitize(playlist_id)
@@ -299,7 +346,26 @@ function EXPO.save_quick_picks_cache(tracks: { types.Track }?)
 	end
 end
 
+-- Concurrent callers (boot and the cached-cookie restore both ask at
+-- startup) share one fetch instead of each pulling the home feed.
+local qp_waiters: { ((any?, any?) -> ())? }? = nil
+
 function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
+	if qp_waiters then
+		table.insert(qp_waiters, callback)
+		return
+	end
+	qp_waiters = { callback }
+	local function deliver(tracks, mixes)
+		local waiters = qp_waiters or {}
+		qp_waiters = nil
+		for _, cb in ipairs(waiters) do
+			if cb then
+				cb(tracks, mixes)
+			end
+		end
+	end
+	callback = deliver
 	local tmp_raw = scratch.path("qp-raw")
 	it.innerTube("browse", { context = CONTEXT.context, browseId = "FEmusic_home" }, function(raw_body, _err)
 		if not raw_body or raw_body == "" then
@@ -327,7 +393,27 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 			end
 			-- Signed in, page one often has no mixes at all ("Mixed for you" etc.
 			-- come on later pages): follow the continuation for up to 3 pages.
+			local seen = {}
 			local function finish()
+			-- Signed-in home feeds can carry almost no mixes; top up to 6 with
+			-- radios seeded from the (personal) quick picks.
+			local MIN_MIXES = 6
+			for _, tr in ipairs(tracks) do
+				if #mixes >= MIN_MIXES then
+					break
+				end
+				local rid = "RDAMVM" .. tostring(tr.id)
+				if tr.id and tr.id ~= "" and not seen[rid] then
+					seen[rid] = true
+					table.insert(mixes, {
+						id = rid,
+						title = tostring(tr.title or "Track") .. " Radio",
+						subtitle = tr.artist or "",
+						videoId = "",
+						thumbnail_url = tr.thumbnail_url or "",
+					})
+				end
+			end
 			if #mixes > 0 then
 				math.randomseed(os.time() + #mixes)
 				for i = #mixes, 2, -1 do
@@ -344,7 +430,6 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 				callback(tracks, mixes)
 			end
 			end
-			local seen = {}
 			for _, m in ipairs(mixes) do
 				seen[m.id] = true
 			end
