@@ -25,8 +25,8 @@ local DEP_IMPACT = {
 }
 
 local STEP_TEXTS = {
-	"Close any open windows of your browser.",
-	"Pick a browser below — it opens a fresh window. Sign in to YouTube Music there.",
+	"Zen or Firefox already signed in to YouTube Music? One click on it is enough.",
+	"Otherwise pick a browser — it opens a window (Chromium-based: close its other windows first). Sign in there.",
 	"Leave the browser open, then pick the same browser again to pull the cookies in.",
 }
 
@@ -163,8 +163,16 @@ local function build_browser_cells()
 
 		local glyph, label_color = b.icon, "on_surface"
 		local fill, border = "surface_container/0.3", "outline_variant"
+		-- Firefox-based browsers are read from the user's own profile (yt-dlp
+		-- --cookies-from-browser), so an already signed-in browser needs no
+		-- extra window: extract on the first click and open the browser only
+		-- after a miss. Chromium-based ones still go through a fresh profile.
+		local reads_profile = (b.id == "firefox" or b.id == "zen")
 		local click = function()
-			if state.data.browser == b.id and state.data.status_text:find("Opened") then
+			local same = state.data.browser == b.id
+			if same and state.data.status_text:find("Opened") then
+				request("extract", { browser = b.id })
+			elseif reads_profile and not (same and state.data.status == "error") then
 				request("extract", { browser = b.id })
 			else
 				request("open_login", { browser = b.id })
