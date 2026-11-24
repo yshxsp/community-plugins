@@ -33,10 +33,30 @@ local WATCHED = {
 	"playlist-pos",
 }
 
--- A freshly minted googlevideo URL answers 403 for its first few seconds.
--- Retry the track (entry 1) every 0.5 s for up to 10 s; meanwhile mpv falls
--- through to the silent dummy, and that playlist move must not reach the
--- plugin, which would read it as a skip. Only a final failure is reported.
+-- A freshly minted googlevideo URL answers 403 until it is ~2.1-2.7 s old
+-- (measured from yt-dlp's exit). First line of defence: on_load_fail holds the
+-- failed open and retries it in place once the URL is ~2.9 s old, so mpv
+-- never leaves the track. mpv runs this hook once per load; the cache-busting
+-- parameter makes it count as a new URL.
+local WARM_AFTER = 2.9
+local started_at = mp.get_time()
+
+mp.add_hook("on_load_fail", 50, function(hook)
+	local url = mp.get_property("stream-open-filename") or ""
+	if mp.get_property_number("playlist-pos") ~= 1 or not url:match("^https?://") then
+		return
+	end
+	hook:defer()
+	mp.add_timeout(math.max(0.5, WARM_AFTER - (mp.get_time() - started_at)), function()
+		mp.set_property("stream-open-filename", url .. "&ytmretry=1")
+		hook:cont()
+	end)
+end)
+
+-- Fallback if that retry fails too: mpv falls through to the silent dummy;
+-- replay the track every 0.5 s for up to 10 s, hiding that playlist move from
+-- the plugin (it would read it as a skip). Each round trip through the dummy
+-- costs RSS, hence the in-place retry above. Only a final failure is reported.
 local RETRY_DELAY = 0.5
 local MAX_RETRIES = 20
 local retries = 0
