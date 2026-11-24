@@ -95,8 +95,6 @@ EXPO.SEARCH_TRACKS = [[{
   } | select(.id != "" and .title != "")] | unique_by(.id)
 }]]
 
--- Continuation pages of FEmusic_home: personal mixes live past page one.
-EXPO.HOME_MIXES_PAGE = [[{ mixes: [.. | select(.musicTwoRowItemRenderer? != null) | .musicTwoRowItemRenderer | { id: (.navigationEndpoint.browseEndpoint.browseId // .navigationEndpoint.watchEndpoint.playlistId // ""), title: (.title.runs[0].text // ""), subtitle: (.subtitle.runs[0].text // ""), videoId: (.navigationEndpoint.watchEndpoint.videoId // ""), thumbnail_url: (.thumbnailRenderer.musicThumbnailRenderer.thumbnail.thumbnails[-1].url // .thumbnail.musicThumbnailRenderer.thumbnail.thumbnails[-1].url // "") } | select(.id != "" and .title != "" and .videoId == "" and (.id | test("^(VL)?RD")) and (.subtitle != "Album") and (.subtitle != "Playlist") and (.subtitle != "Song") and (.subtitle != "Single") and (.subtitle | endswith("subscribers") | not))] | unique_by(.id) | .[0:60], next_token: ([.. | objects | (.nextContinuationData.continuation // .continuationCommand.token) | select(. != null and . != "")] | .[0] // null) }]]
 
 -- Track radio (watch playlist RDAMVM<videoId>) from the `next` endpoint. No
 -- unique_by: it sorts, and radio order matters; dedupe happens in Luau.

@@ -387,14 +387,14 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 			local data = noctalia.json.decode(out)
 			local tracks = (type(data) == "table" and type(data.tracks) == "table") and data.tracks or {}
 			local mixes = (type(data) == "table" and type(data.mixes) == "table") and data.mixes or {}
-			if #tracks > 0 then
-				attach_cached_thumbs(tracks)
-				EXPO.save_quick_picks_cache(tracks)
-			end
 			-- Signed in, page one often has no mixes at all ("Mixed for you" etc.
 			-- come on later pages): follow the continuation for up to 3 pages.
 			local seen = {}
 			local function finish()
+			if #tracks > 0 then
+				attach_cached_thumbs(tracks)
+				EXPO.save_quick_picks_cache(tracks)
+			end
 			-- Signed-in home feeds can carry almost no mixes; top up to 6 with
 			-- radios seeded from the (personal) quick picks.
 			local MIN_MIXES = 6
@@ -433,8 +433,14 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 			for _, m in ipairs(mixes) do
 				seen[m.id] = true
 			end
+			local seen_tracks = {}
+			for _, tr in ipairs(tracks) do
+				seen_tracks[tr.id] = true
+			end
+			-- Shelf order on the home feed varies: Quick picks may sit on a later
+			-- page too, so continuation pages are read with the full filter.
 			local function more(token, pages)
-				if not token or token == "" or pages >= 3 or #mixes >= 12 then
+				if not token or token == "" or pages >= 3 or (#mixes >= 12 and #tracks >= 15) then
 					finish()
 					return
 				end
@@ -445,8 +451,16 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 					end
 					local page_raw = scratch.path("qp-raw")
 					noctalia.writeFile(page_raw, body)
-					network.runAsync({ "jq", filters.HOME_MIXES_PAGE, page_raw }, function(r)
+					network.runAsync({ "jq", filters.QUICK_PICKS, page_raw }, function(r)
 						local d = noctalia.json.decode((type(r) == "table" and r.stdout) or "")
+						if type(d) == "table" and type(d.tracks) == "table" then
+							for _, tr in ipairs(d.tracks) do
+								if #tracks < 15 and not seen_tracks[tr.id] then
+									seen_tracks[tr.id] = true
+									table.insert(tracks, tr)
+								end
+							end
+						end
 						if type(d) == "table" and type(d.mixes) == "table" then
 							for _, m in ipairs(d.mixes) do
 								if not seen[m.id] then
