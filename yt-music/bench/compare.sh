@@ -6,11 +6,12 @@
 #   mini    - queue playing, mini panel open
 # Each window reports noctalia CPU (self / reaped children), mpv CPU and the
 # plugin's own launches (bench-spawns.log).
-# Usage: bench/compare.sh <seconds> <rev> [<rev> ...]
+# Usage: cp bench/compare.sh /tmp/x.sh; PLUGIN_DIR=$PWD /tmp/x.sh <seconds> <rev>...
 set -euo pipefail
 
 win="$1"; shift
-dir="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
+# Run a copy from outside the plugin dir: checkouts replace this file mid-run.
+dir="${PLUGIN_DIR:-$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)}"
 id="yshxsp/yt-music"
 cache="$HOME/.cache/yt-music"
 queue="$cache/bench-queue.json"
