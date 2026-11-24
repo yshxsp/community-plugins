@@ -1,3 +1,4 @@
+require("./utils/benchspawn.luau")("service")
 local REQ_KEY = "yt_music.request"
 
 local api = require("./api.luau")
@@ -389,5 +390,25 @@ store.publish()
 function onStop()
 	if api and api.save_session then
 		api.save_session(state.player)
+	end
+end
+
+-- CLI control: noctalia msg plugin yshxsp/yt-music:service <target> <action> [json]
+-- Dispatches to the same ACTIONS table the panels use.
+function onIpc(event, payload)
+	local handler = ACTIONS[tostring(event or "")]
+	if not handler then
+		log("ipc: unknown action '" .. tostring(event) .. "'")
+		return
+	end
+	local req = {}
+	if type(payload) == "table" then
+		req = payload
+	elseif type(payload) == "string" and payload ~= "" then
+		req = noctalia.json.decode(payload) or {}
+	end
+	local ok, err = pcall(handler, req)
+	if not ok then
+		log("ipc error in '" .. tostring(event) .. "': " .. tostring(err))
 	end
 end

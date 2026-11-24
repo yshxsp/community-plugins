@@ -1,3 +1,4 @@
+require("./utils/benchspawn.luau")("mini")
 local STATE = "yt_music.state"
 local theme = require("./utils/theme.luau")
 local request = require("./views/actions.luau")
