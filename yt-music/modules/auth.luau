@@ -101,7 +101,7 @@ function Auth.extract_cookies(browser)
 					if type(qp) == "table" and #qp > 0 then
 						state.quick_picks = qp
 					end
-					if type(mixes) == "table" and #mixes > 0 then
+					if type(mixes) == "table" then
 						state.home_mixes = mixes
 					end
 					store.publish()

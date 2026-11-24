@@ -325,6 +325,9 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 				attach_cached_thumbs(tracks)
 				EXPO.save_quick_picks_cache(tracks)
 			end
+			-- Signed in, page one often has no mixes at all ("Mixed for you" etc.
+			-- come on later pages): follow the continuation for up to 3 pages.
+			local function finish()
 			if #mixes > 0 then
 				math.randomseed(os.time() + #mixes)
 				for i = #mixes, 2, -1 do
@@ -340,6 +343,38 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 			if callback then
 				callback(tracks, mixes)
 			end
+			end
+			local seen = {}
+			for _, m in ipairs(mixes) do
+				seen[m.id] = true
+			end
+			local function more(token, pages)
+				if not token or token == "" or pages >= 3 or #mixes >= 12 then
+					finish()
+					return
+				end
+				it.innerTube("browse", { context = CONTEXT.context, continuation = token }, function(body)
+					if not body or body == "" then
+						finish()
+						return
+					end
+					local page_raw = scratch.path("qp-raw")
+					noctalia.writeFile(page_raw, body)
+					network.runAsync({ "jq", filters.HOME_MIXES_PAGE, page_raw }, function(r)
+						local d = noctalia.json.decode((type(r) == "table" and r.stdout) or "")
+						if type(d) == "table" and type(d.mixes) == "table" then
+							for _, m in ipairs(d.mixes) do
+								if not seen[m.id] then
+									seen[m.id] = true
+									table.insert(mixes, m)
+								end
+							end
+						end
+						more(type(d) == "table" and d.next_token or nil, pages + 1)
+					end, 15000)
+				end, true)
+			end
+			more(type(data) == "table" and data.next_token or nil, 0)
 		end, 15000)
 	end, true)
 end
