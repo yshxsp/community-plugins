@@ -404,6 +404,8 @@ function onIpc(event, payload)
 	local req = {}
 	if type(payload) == "table" then
 		req = payload
+	elseif type(payload) == "string" and payload:sub(1, 1) == "@" then
+		req = noctalia.json.decode(noctalia.readFile(payload:sub(2)) or "") or {}
 	elseif type(payload) == "string" and payload ~= "" then
 		req = noctalia.json.decode(payload) or {}
 	end
