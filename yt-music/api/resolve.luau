@@ -21,12 +21,15 @@ local network = require("../utils/network.luau")
 
 -- Fast path (the "last client that worked" idea from ArchiveTune): yt-dlp's
 -- default clients cost ~4.5 s per resolve, mostly sequential requests. Asking
--- only tv_samsung, without the watch page, returns the same Opus 251 in
--- ~3.1 s (measured 2026-11-26). No other single client returns audio-only
--- formats, so the result is accepted only when it is audio-only; otherwise
--- the resolve is redone with the default clients and the fast path rests for
--- FAST_BACKOFF_S. This keeps quality even when YouTube changes the client.
-local FAST_EXTRACTOR_ARGS = "youtube:player_client=tv_samsung;player_skip=webpage,configs"
+-- only tv_samsung returns the same Opus 251 in ~1.9 s (measured 2026-11-26):
+-- no watch page, no configs, a www URL (a music URL adds a web_music player
+-- request) and no initial data (the ~1 s watch-next request; views and likes
+-- come from api/stats.luau in-process instead). No other single client
+-- returns audio-only formats, so the result is accepted only when it is
+-- audio-only; otherwise the resolve is redone with the default clients and
+-- the fast path rests for FAST_BACKOFF_S. Quality holds even when YouTube
+-- changes the client.
+local FAST_EXTRACTOR_ARGS = "youtube:player_client=tv_samsung;player_skip=webpage,configs,initial_data"
 local FAST_BACKOFF_S = 10 * 60
 local fast_disabled_until = 0
 
@@ -56,7 +59,8 @@ local function build_resolve_argv(safe_id: string, fast: boolean): { string }
 		table.insert(argv, "--cookies")
 		table.insert(argv, COOKIE_PATH)
 	end
-	table.insert(argv, "https://music.youtube.com/watch?v=" .. safe_id)
+	local host = fast and "https://www.youtube.com" or "https://music.youtube.com"
+	table.insert(argv, host .. "/watch?v=" .. safe_id)
 	return argv
 end
 
@@ -272,9 +276,13 @@ attempt_resolve = function(video_id, attempt, fast)
 		local callbacks = resolving_in_flight[video_id] or {}
 		resolving_in_flight[video_id] = nil
 
-		local views, likes, duration = out:match("STATS=(%d*)|(%d*)|([%d%.]*)")
-		if views then
-			stats.store_stats(video_id, tonumber(views) or 0, tonumber(likes) or 0)
+		-- The fast path prints NA for views/likes (no initial data); the
+		-- player then gets them from stats.track_stats.
+		local views, likes, duration = out:match("STATS=([%w]*)|([%w]*)|([%w%.]*)")
+		if tonumber(views) and tonumber(likes) then
+			stats.store_stats(video_id, tonumber(views) :: number, tonumber(likes) :: number)
+		end
+		if tonumber(duration) then
 			stream_durations[video_id] = tonumber(duration)
 		end
 		if url ~= "" then

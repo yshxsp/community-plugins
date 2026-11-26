@@ -18,7 +18,7 @@
 
 local utils = require("mp.utils")
 
-local opts = { cache = "", partial = "" }
+local opts = { cache = "", partial = "", epoch = "" }
 require("mp.options").read_options(opts, "ytm")
 
 local function emit(t)
@@ -39,8 +39,28 @@ local WATCHED = {
 -- failed open and retries it in place once the URL is ~2.9 s old, so mpv
 -- never leaves the track. mpv runs this hook once per load; the cache-busting
 -- parameter makes it count as a new URL.
+--
+-- The moment a URL starts serving is fixed by the URL itself: measured
+-- 2026-11-26 on 5 fresh URLs it was expire - 21595.8..21595.9 s, so the retry
+-- is timed from the expire parameter (plus a margin) instead of a fixed wait.
+-- mpv.sh passes its wall clock at launch (ytm-epoch); the script's own clock
+-- runs from slightly later, so the estimate errs towards waiting longer. URLs
+-- without expire, or without the epoch, keep the fixed WARM_AFTER.
 local WARM_AFTER = 2.9
+local SERVES_BEFORE_EXPIRE = 21596
+local SERVE_MARGIN = 0.3
 local started_at = mp.get_time()
+local launch_epoch = tonumber(opts.epoch)
+
+local function retry_delay(url)
+	local expire = tonumber(url:match("[?&]expire=(%d+)"))
+	if expire and launch_epoch then
+		local now = launch_epoch + (mp.get_time() - started_at)
+		local delay = expire - SERVES_BEFORE_EXPIRE + SERVE_MARGIN - now
+		return math.min(math.max(delay, 0.05), 6)
+	end
+	return math.max(0.5, WARM_AFTER - (mp.get_time() - started_at))
+end
 
 mp.add_hook("on_load_fail", 50, function(hook)
 	local url = mp.get_property("stream-open-filename") or ""
@@ -48,7 +68,7 @@ mp.add_hook("on_load_fail", 50, function(hook)
 		return
 	end
 	hook:defer()
-	mp.add_timeout(math.max(0.5, WARM_AFTER - (mp.get_time() - started_at)), function()
+	mp.add_timeout(retry_delay(url), function()
 		mp.set_property("stream-open-filename", url .. "&ytmretry=1")
 		hook:cont()
 	end)

@@ -8,7 +8,6 @@ local log = logger.module("ytapi", "stats")
 
 local const = require("./constants.luau")
 local STATS_CACHE_PATH = const.STATS_CACHE_PATH
-local COOKIE_PATH = const.COOKIE_PATH
 
 -- Counts are refreshed by every stream resolve (same yt-dlp run), so a stale
 -- entry is still served as-is: it only matters for tracks played from the
@@ -70,6 +69,36 @@ function EXPO.store_stats(video_id: string, views: number, likes: number)
 	save_cache()
 end
 
+local WEB_CLIENT_VERSION = "2.20260708.05.00"
+local VIEWS_ANCHOR = '"videoViewCountRenderer":{"viewCount":{"simpleText":"'
+local LIKES_ANCHOR = "along with "
+
+local function count_after(raw: string, anchor: string, pattern: string): number?
+	local from = 1
+	for _ = 1, 5 do
+		local at = raw:find(anchor, from, true)
+		if not at then
+			return nil
+		end
+		local digits = raw:sub(at, at + #anchor + 40):match(pattern)
+		if digits then
+			return tonumber((digits:gsub(",", "")))
+		end
+		from = at + #anchor
+	end
+	return nil
+end
+
+-- Views and likes from a WEB watch-next response (hl=en).
+local function parse_counts(raw: string): (number?, number?)
+	if raw == "" then
+		return nil, nil
+	end
+	local views = count_after(raw, VIEWS_ANCHOR, '^' .. VIEWS_ANCHOR:gsub("[%p]", "%%%0") .. "([%d,]+) view")
+	local likes = count_after(raw, LIKES_ANCHOR, "^along with ([%d,]+) other people")
+	return views, likes
+end
+
 function EXPO.track_stats(video_id: string, cb: ((number, number) -> ())?)
 	if type(video_id) ~= "string" or video_id == "" then
 		if cb then
@@ -94,44 +123,16 @@ function EXPO.track_stats(video_id: string, cb: ((number, number) -> ())?)
 	end
 	stats_in_flight[video_id] = { cb }
 
-	local safe_id = video_id:gsub("[^%w%-_]", "_")
-	if not noctalia.fileExists(COOKIE_PATH) then
-		log("stats nocache for id=" .. video_id .. " views=0 likes=0")
-		stats_cache[video_id] = { views = 0, likes = 0, timestamp = os.time() }
-		save_cache()
-		local callbacks_nc = stats_in_flight[video_id] or {}
-		stats_in_flight[video_id] = nil
-		for _, callback in ipairs(callbacks_nc) do
-			if callback then
-				callback(0, 0)
-			end
+	-- One in-process request instead of a yt-dlp run (~1.7 s CPU): the
+	-- watch-next response of the WEB client carries both counts as text, so
+	-- two plain finds read them without decoding ~400 KB of JSON. No cookies
+	-- needed. A failed request is not cached, so the counts are asked for
+	-- again on the next play.
+	local function finish(views: number, likes: number, ok: boolean)
+		if ok then
+			stats_cache[video_id] = { views = views, likes = likes, timestamp = os.time() }
+			save_cache()
 		end
-		return
-	end
-	local argv = {
-		"yt-dlp",
-		"--skip-download",
-		"--no-playlist",
-		"--no-warnings",
-		"--cookies",
-		COOKIE_PATH,
-		"--print",
-		"%(view_count)s|%(like_count)s",
-		"https://www.youtube.com/watch?v=" .. safe_id,
-	}
-
-	network.runAsync(argv, function(res)
-		local out = type(res) == "table" and res.stdout or ""
-		local views = 0
-		local likes = 0
-		local v, l = out:match("(%d*)|(%d*)")
-		if v or l then
-			views = tonumber(v) or 0
-			likes = tonumber(l) or 0
-		end
-		log("stats fetched for id=" .. video_id .. " views=" .. views .. " likes=" .. likes)
-		stats_cache[video_id] = { views = views, likes = likes, timestamp = os.time() }
-		save_cache()
 		local callbacks = stats_in_flight[video_id] or {}
 		stats_in_flight[video_id] = nil
 		for _, callback in ipairs(callbacks) do
@@ -139,7 +140,27 @@ function EXPO.track_stats(video_id: string, cb: ((number, number) -> ())?)
 				callback(views, likes)
 			end
 		end
-	end, 30000)
+	end
+
+	local body = noctalia.json.encode({
+		context = { client = { clientName = "WEB", clientVersion = WEB_CLIENT_VERSION, hl = "en" } },
+		videoId = video_id,
+	})
+	local accepted = network.http({
+		url = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+		method = "POST",
+		body = body,
+		headers = { "Content-Type: application/json", "Origin: https://www.youtube.com", "User-Agent: Mozilla/5.0" },
+	}, function(resp)
+		local raw = type(resp) == "table" and resp.ok and resp.body or ""
+		local views, likes = parse_counts(raw)
+		local ok = views ~= nil or likes ~= nil
+		log("stats fetched for id=" .. video_id .. " views=" .. tostring(views) .. " likes=" .. tostring(likes))
+		finish(views or 0, likes or 0, ok)
+	end)
+	if not accepted then
+		finish(0, 0, false)
+	end
 end
 
 return EXPO

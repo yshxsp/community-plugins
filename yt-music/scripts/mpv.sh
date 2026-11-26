@@ -55,10 +55,13 @@ mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file $5=cache_path
   local extra=()
   # Feed mpv-mpris cover-art-files so system widgets get mpris:artUrl.
   [ -n "${4:-}" ] && [ -f "$4" ] && extra+=("--cover-art-file=$4")
-  [ -n "${5:-}" ] && [ -n "${6:-}" ] && extra+=("--script-opts=ytm-cache=$5,ytm-partial=$6")
+  local cache_opts=""
+  [ -n "${5:-}" ] && [ -n "${6:-}" ] && cache_opts=",ytm-cache=$5,ytm-partial=$6"
 
   lock
   stop_previous TERM
+  # ytm-epoch: wall clock right at launch, so ytm.lua can time a fresh URL's
+  # retry from its expire parameter.
   # 9>&-: mpv must not inherit the lock fd, or the lock would outlive this
   # script (held open by the playing mpv) and deadlock the next play.
   # Headless audio: none of mpv's built-in UI scripts (7 fewer threads; the
@@ -74,6 +77,7 @@ mpv_play() {   # $1=volume $2=url_file $3=title_file $4=cover_file $5=cache_path
     --keep-open=always --pause=no --volume="$vol" \
     --force-media-title="$title" \
     --script="$SCRIPT" "${extra[@]}" \
+    --script-opts="ytm-epoch=$EPOCHREALTIME$cache_opts" \
     --input-ipc-server="$SOCK" --ao=pipewire,pulse,alsa,auto --pipewire-buffer=200 \
     >/dev/null 2>&1 9>&- &
   echo $! > "$PIDFILE"
