@@ -331,18 +331,29 @@ end
 api.on_library_settled(drain_library)
 
 -- Connectivity: nothing runs while requests succeed. A transport failure
--- (network.reportFailure) starts an in-process probe now and every 20 s until
--- YouTube Music answers again.
-local PROBE_INTERVAL = 20 * 1000
+-- (network.reportFailure) starts an in-process probe at once, then after 2, 4,
+-- 8 and 16 s and every 20 s until YouTube Music answers again. Coming back
+-- online reloads the home feed and the library: at boot the shell usually
+-- starts a few seconds before Wi-Fi, so the first fetches fail.
+local PROBE_FIRST_MS = 2 * 1000
+local PROBE_MAX_MS = 20 * 1000
 local probing = false
 local probe_in_flight = false
+local probe_delay = PROBE_FIRST_MS
 
 local function set_online(now_online)
 	if now_online ~= state.online then
+		local was_offline = state.online == false
 		state.online = now_online
 		network.setOnline(now_online)
 		store.publish()
 		log(now_online and "network: back online" or "network: offline")
+		if now_online and was_offline then
+			home.refresh_quick_picks()
+			if api and api.library then
+				api.library()
+			end
+		end
 	end
 end
 
@@ -351,7 +362,8 @@ local probe
 local function probe_loop()
 	if probing then
 		probe()
-		timer.after(PROBE_INTERVAL, probe_loop)
+		probe_delay = math.min(probe_delay * 2, PROBE_MAX_MS)
+		timer.after(probe_delay, probe_loop)
 	end
 end
 
@@ -367,7 +379,8 @@ probe = function()
 			probing = false
 		elseif not probing then
 			probing = true
-			timer.after(PROBE_INTERVAL, probe_loop)
+			probe_delay = PROBE_FIRST_MS
+			timer.after(probe_delay, probe_loop)
 		end
 	end)
 end

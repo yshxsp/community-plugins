@@ -29,6 +29,11 @@ end
 
 -- Drop-in for noctalia.runAsync for anything that may touch the network.
 -- Local-only work (mpv IPC, disk scans) must NOT use this.
+--
+-- Contract for runAsync/http/download: the return value is false only when
+-- cb will never run (the host refused the request). Offline, cb still runs
+-- (deferred) with a failure result and the call returns true, so callers
+-- never complete the same request twice.
 function Net.runAsync(cmd, cb, timeout, tag)
 	if not online then
 		if cb then
@@ -36,7 +41,7 @@ function Net.runAsync(cmd, cb, timeout, tag)
 				cb(synthetic_result())
 			end)
 		end
-		return false
+		return true
 	end
 	return proc.runAsync(cmd, cb, timeout)
 end
@@ -59,8 +64,10 @@ end
 -- Drop-in for noctalia.http; offline delivers a failed response object.
 function Net.http(req, cb)
 	if not online then
-		cb({ ok = false, status = 0, body = "" })
-		return false
+		timer.defer(function()
+			cb({ ok = false, status = 0, body = "" })
+		end)
+		return true
 	end
 	return proc.http(req, function(resp)
 		if type(resp) ~= "table" or (not resp.ok and (tonumber(resp.status) or 0) == 0) then
@@ -73,8 +80,10 @@ end
 -- In-process download to a file; offline answers cb(false) without trying.
 function Net.download(url, dest, cb)
 	if not online then
-		cb(false)
-		return false
+		timer.defer(function()
+			cb(false)
+		end)
+		return true
 	end
 	return proc.download(url, dest, cb)
 end

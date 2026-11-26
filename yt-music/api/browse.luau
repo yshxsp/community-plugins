@@ -346,6 +346,28 @@ function EXPO.save_quick_picks_cache(tracks: { types.Track }?)
 	end
 end
 
+-- Home mixes are cached like quick picks, so a start without network (or a
+-- failed fetch) still shows the last known mixes.
+function EXPO.save_home_mixes_cache(mixes: { any }?)
+	if type(mixes) ~= "table" then
+		return
+	end
+	local encoded = noctalia.json.encode(mixes)
+	if encoded then
+		noctalia.writeFile(const.HOME_MIXES_CACHE_PATH, encoded)
+	end
+end
+
+function EXPO.load_cached_home_mixes(): { any }?
+	local raw = noctalia.fileExists(const.HOME_MIXES_CACHE_PATH) and noctalia.readFile(const.HOME_MIXES_CACHE_PATH)
+	local data = raw and raw ~= "" and noctalia.json.decode(raw) or nil
+	if type(data) == "table" and #data > 0 then
+		attach_cached_thumbs(data)
+		return data
+	end
+	return nil
+end
+
 -- Concurrent callers (boot and the cached-cookie restore both ask at
 -- startup) share one fetch instead of each pulling the home feed.
 local qp_waiters: { ((any?, any?) -> ())? }? = nil
@@ -367,10 +389,12 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 	end
 	callback = deliver
 	local tmp_raw = scratch.path("qp-raw")
+	-- A failed fetch delivers (nil, nil) so callers keep what they show; an
+	-- empty table means YouTube really returned nothing.
 	it.innerTube("browse", { context = CONTEXT.context, browseId = "FEmusic_home" }, function(raw_body, _err)
 		if not raw_body or raw_body == "" then
 			if callback then
-				callback({}, {})
+				callback(nil, nil)
 			end
 			return
 		end
@@ -378,14 +402,14 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 		local filter = filters.QUICK_PICKS
 		network.runAsync({ "jq", filter, tmp_raw }, function(res)
 			local out = (type(res) == "table" and res.stdout) or ""
-			if out == "" then
+			local data = out ~= "" and noctalia.json.decode(out) or nil
+			if type(data) ~= "table" then
 				if callback then
-					callback({}, {})
+					callback(nil, nil)
 				end
 				return
 			end
-			local data = noctalia.json.decode(out)
-			local tracks = (type(data) == "table" and type(data.tracks) == "table") and data.tracks or {}
+			local tracks = type(data.tracks) == "table" and data.tracks or {}
 			local mixes = (type(data) == "table" and type(data.mixes) == "table") and data.mixes or {}
 			-- Signed in, page one often has no mixes at all ("Mixed for you" etc.
 			-- come on later pages): follow the continuation for up to 3 pages.
@@ -426,6 +450,7 @@ function EXPO.fetch_quick_picks(callback: ((any?, any?) -> ())?)
 				end
 				attach_cached_thumbs(mixes)
 			end
+			EXPO.save_home_mixes_cache(mixes)
 			if callback then
 				callback(tracks, mixes)
 			end

@@ -158,6 +158,9 @@ function Auth.load_cached_cookies()
 						state.quick_picks = qp
 					end
 				end
+				if api and api.load_cached_home_mixes and (type(state.home_mixes) ~= "table" or #state.home_mixes == 0) then
+					state.home_mixes = api.load_cached_home_mixes() or state.home_mixes
+				end
 				library.sync_audio_cache()
 				store.publish()
 				if api and api.fetch_quick_picks then

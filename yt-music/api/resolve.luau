@@ -254,13 +254,13 @@ attempt_resolve = function(video_id, attempt)
 			end
 		end
 	end, 30000)
-	if not launched and network.isOnline() then
+	if not launched then
 		-- Host refused the spawn: rapid skips fill every slot with stale
 		-- yt-dlp fetches, so the final song's resolve is the one refused and
 		-- its entry would wedge (UI loading forever + id poisoned). Retry once
 		-- after the burst drains; if that also fails, fail fast with nil so
-		-- the owner falls back to stopped instead of hanging. Offline needs
-		-- no handling: the net gate already scheduled its synthetic failure.
+		-- the owner falls back to stopped instead of hanging. (Offline is not
+		-- a refusal: the net gate schedules a synthetic failure instead.)
 		if attempt < 1 then
 			log("stream resolve launch refused for id=" .. video_id .. ", retrying")
 			local scheduled = timer.after(1500, function()
