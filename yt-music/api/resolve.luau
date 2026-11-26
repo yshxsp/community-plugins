@@ -48,6 +48,24 @@ local FAST_BACKOFF_S = 10 * 60
 local tier_disabled_until: { [number]: number } = {}
 local VIDEO_SPECIFIC_ERRORS = { "confirm your age", "Private video", "members-only", "Join this channel" }
 
+-- A miss that is about the video itself says nothing about the client.
+local function video_specific_error(res: any): boolean
+	local err = type(res) == "table" and res.stderr or ""
+	for _, needle in ipairs(VIDEO_SPECIFIC_ERRORS) do
+		if err:find(needle, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+-- Offline, timed out, or reaped by our own supersede kill: no verdict on the
+-- client either.
+local function inconclusive(res: any, out: string): boolean
+	return out:find("NETGATE=OFFLINE", 1, true) ~= nil
+		or (type(res) == "table" and (res.timedOut or res.exitCode == 143 or res.exitCode == 137))
+end
+
 local function first_tier(from: number): number
 	local now = os.time()
 	for i = from, #FAST_TIERS do
@@ -165,25 +183,49 @@ function EXPO.cache_audio(video_id, callback)
 	end
 
 	noctalia.mkdirAll(AUDIO_DIR)
-	local argv = { "yt-dlp", "-f", "bestaudio/best", "-o", path }
-	if noctalia.fileExists(COOKIE_PATH) then
-		table.insert(argv, "--cookies")
-		table.insert(argv, COOKIE_PATH)
-	end
-	table.insert(argv, "https://music.youtube.com/watch?v=" .. safe_id)
+	-- Same first tier as playback: visionos without cookies has no preroll
+	-- ad, so yt-dlp doesn't sleep until the ad would have ended, and needs
+	-- no JS challenge. "bestaudio" without "/best" so a client that offers
+	-- only muxed video fails instead of saving a video. Any miss redoes the
+	-- download with the default clients and cookies.
+	local function run(fast: boolean)
+		local argv = { "yt-dlp", "-f", fast and "bestaudio" or "bestaudio/best", "-o", path }
+		if fast then
+			table.insert(argv, "--extractor-args")
+			table.insert(argv, FAST_TIERS[1].args)
+			table.insert(argv, "https://www.youtube.com/watch?v=" .. safe_id)
+		else
+			if noctalia.fileExists(COOKIE_PATH) then
+				table.insert(argv, "--cookies")
+				table.insert(argv, COOKIE_PATH)
+			end
+			table.insert(argv, "https://music.youtube.com/watch?v=" .. safe_id)
+		end
 
-	local launched = network.runAsync(argv, function(res)
-		local ok = noctalia.fileExists(path)
-		if not ok and type(res) == "table" then
-			ok = res.exitCode == 0
+		local launched = network.runAsync(argv, function(res)
+			local ok = noctalia.fileExists(path)
+			if not ok and type(res) == "table" then
+				ok = res.exitCode == 0
+			end
+			local out = type(res) == "table" and res.stdout or ""
+			if not ok and fast and not inconclusive(res, out) then
+				if not video_specific_error(res) then
+					tier_disabled_until[1] = os.time() + FAST_BACKOFF_S
+				end
+				log("audio download via " .. FAST_TIERS[1].name .. " failed for id=" .. video_id .. "; default clients")
+				noctalia.removeFile(path .. ".part")
+				run(false)
+				return
+			end
+			if callback then
+				callback(ok)
+			end
+		end, 120000)
+		if not launched and callback then
+			callback(false)
 		end
-		if callback then
-			callback(ok)
-		end
-	end, 120000)
-	if not launched and callback then
-		callback(false)
 	end
+	run(os.time() >= (tier_disabled_until[1] or 0))
 end
 
 function EXPO.resolve_stream(video_id: string, cb: ((string?) -> ())?)
@@ -271,18 +313,8 @@ attempt_resolve = function(video_id, attempt, tier)
 		if fast then
 			local _fid, acodec, vcodec = out:match("FMT=([^|\n]*)|([^|\n]*)|([^|\n]*)")
 			local audio_only = acodec and acodec ~= "none" and vcodec == "none"
-			local offline = out:find("NETGATE=OFFLINE", 1, true) ~= nil
-			local timed_out = type(res) == "table" and res.timedOut
-			local reaped = type(res) == "table" and (res.exitCode == 143 or res.exitCode == 137)
-			if not (url ~= "" and audio_only) and not offline and not timed_out and not reaped then
-				local err = type(res) == "table" and res.stderr or ""
-				local video_specific = false
-				for _, needle in ipairs(VIDEO_SPECIFIC_ERRORS) do
-					if err:find(needle, 1, true) then
-						video_specific = true
-						break
-					end
-				end
+			if not (url ~= "" and audio_only) and not inconclusive(res, out) then
+				local video_specific = video_specific_error(res)
 				if not video_specific then
 					tier_disabled_until[tier] = os.time() + FAST_BACKOFF_S
 				end
