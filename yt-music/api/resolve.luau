@@ -19,11 +19,23 @@ local types = require("../utils/types.luau")
 local stats = require("./stats.luau")
 local network = require("../utils/network.luau")
 
-local function build_resolve_argv(safe_id: string): { string }
-	-- yt-dlp's own client selection: the old forced mweb,web clients are
-	-- SABR-only now and fell back to format 18 (360p video, ~22 kbps AAC).
-	-- One extraction yields the stream URL (last line) plus view/like counts
-	-- and duration, so playback never needs a second yt-dlp run for stats.
+-- Fast path (the "last client that worked" idea from ArchiveTune): yt-dlp's
+-- default clients cost ~4.5 s per resolve, mostly sequential requests. Asking
+-- only tv_samsung, without the watch page, returns the same Opus 251 in
+-- ~3.1 s (measured 2026-11-26). No other single client returns audio-only
+-- formats, so the result is accepted only when it is audio-only; otherwise
+-- the resolve is redone with the default clients and the fast path rests for
+-- FAST_BACKOFF_S. This keeps quality even when YouTube changes the client.
+local FAST_EXTRACTOR_ARGS = "youtube:player_client=tv_samsung;player_skip=webpage,configs"
+local FAST_BACKOFF_S = 10 * 60
+local fast_disabled_until = 0
+
+local function build_resolve_argv(safe_id: string, fast: boolean): { string }
+	-- yt-dlp's own client selection: the old forced mweb,web clients now
+	-- return only format 18 (a 360p video with AAC audio), never audio-only.
+	-- One extraction yields the stream URL (last line) plus view/like counts,
+	-- duration and the chosen format, so playback never needs a second yt-dlp
+	-- run for stats.
 	local argv = {
 		"yt-dlp",
 		"-f",
@@ -31,9 +43,15 @@ local function build_resolve_argv(safe_id: string): { string }
 		"-g",
 		"--print",
 		"STATS=%(view_count)s|%(like_count)s|%(duration)s",
+		"--print",
+		"FMT=%(format_id)s|%(acodec)s|%(vcodec)s",
 		"--no-playlist",
 		"--no-warnings",
 	}
+	if fast then
+		table.insert(argv, "--extractor-args")
+		table.insert(argv, FAST_EXTRACTOR_ARGS)
+	end
 	if noctalia.fileExists(COOKIE_PATH) then
 		table.insert(argv, "--cookies")
 		table.insert(argv, COOKIE_PATH)
@@ -204,16 +222,53 @@ end
 -- Spawn the yt-dlp fetch for a video_id whose callback list is already parked
 -- in resolving_in_flight. Attempt 0 is the first try; on host spawn refusal
 -- (burst saturation from rapid skips) one delayed retry follows, then fail.
-attempt_resolve = function(video_id, attempt)
+attempt_resolve = function(video_id, attempt, fast)
+	if fast == nil then
+		fast = os.time() >= fast_disabled_until
+	end
 	local safe_id = video_id:gsub("[^%w%-_]", "_")
-	log("resolving stream URL for id=" .. video_id)
-	local argv = build_resolve_argv(safe_id)
+	log("resolving stream URL for id=" .. video_id .. (fast and " (fast path)" or ""))
+	local argv = build_resolve_argv(safe_id, fast)
 	local started_ms = noctalia.nowMs()
 	local launched = network.runAsync(argv, function(res)
 		local elapsed_ms = noctalia.nowMs() - started_ms
 		local out = type(res) == "table" and res.stdout or ""
 		local raw_url = out:match("([^\n\r]+)%s*$")
 		local url = sanitize_str(raw_url)
+		if url:sub(1, 4) ~= "http" then
+			url = ""
+		end
+
+		if fast then
+			local _fid, acodec, vcodec = out:match("FMT=([^|\n]*)|([^|\n]*)|([^|\n]*)")
+			local audio_only = acodec and acodec ~= "none" and vcodec == "none"
+			local offline = out:find("NETGATE=OFFLINE", 1, true) ~= nil
+			local timed_out = type(res) == "table" and res.timedOut
+			local reaped = type(res) == "table" and (res.exitCode == 143 or res.exitCode == 137)
+			if not (url ~= "" and audio_only) and not offline and not timed_out and not reaped then
+				log(
+					"fast path rejected for id="
+						.. video_id
+						.. " (format "
+						.. tostring(_fid)
+						.. " "
+						.. tostring(acodec)
+						.. "/"
+						.. tostring(vcodec)
+						.. ", "
+						.. elapsed_ms
+						.. "ms); default clients, fast path off for "
+						.. FAST_BACKOFF_S
+						.. " s"
+				)
+				fast_disabled_until = os.time() + FAST_BACKOFF_S
+				if resolving_in_flight[video_id] then
+					attempt_resolve(video_id, attempt, false)
+				end
+				return
+			end
+		end
+
 		local callbacks = resolving_in_flight[video_id] or {}
 		resolving_in_flight[video_id] = nil
 
@@ -265,7 +320,7 @@ attempt_resolve = function(video_id, attempt)
 			log("stream resolve launch refused for id=" .. video_id .. ", retrying")
 			local scheduled = timer.after(1500, function()
 				if resolving_in_flight[video_id] then
-					attempt_resolve(video_id, attempt + 1)
+					attempt_resolve(video_id, attempt + 1, fast)
 				end
 			end)
 			if scheduled then
