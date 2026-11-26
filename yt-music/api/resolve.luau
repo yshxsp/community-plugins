@@ -19,21 +19,46 @@ local types = require("../utils/types.luau")
 local stats = require("./stats.luau")
 local network = require("../utils/network.luau")
 
--- Fast path (the "last client that worked" idea from ArchiveTune): yt-dlp's
--- default clients cost ~4.5 s per resolve, mostly sequential requests. Asking
--- only tv_samsung returns the same Opus 251 in ~1.9 s (measured 2026-11-26):
--- no watch page, no configs, a www URL (a music URL adds a web_music player
--- request) and no initial data (the ~1 s watch-next request; views and likes
--- come from api/stats.luau in-process instead). No other single client
--- returns audio-only formats, so the result is accepted only when it is
--- audio-only; otherwise the resolve is redone with the default clients and
--- the fast path rests for FAST_BACKOFF_S. Quality holds even when YouTube
--- changes the client.
-local FAST_EXTRACTOR_ARGS = "youtube:player_client=tv_samsung;player_skip=webpage,configs,initial_data"
+-- Fast tiers (the "last client that worked" idea from ArchiveTune), tried in
+-- order before yt-dlp's default clients (~4.5 s per resolve, mostly
+-- sequential requests). Measured 2026-11-26, all returning the same Opus 251:
+--   1. visionos, no cookies: ~1.4 s, no JS challenge, and no preroll ad. With
+--      cookies (tv_samsung, default clients) most tracks carry a 6 s ad and
+--      googlevideo answers 403 until ~4 s after the URL is minted; visionos
+--      URLs serve the whole file at once. It needs the watch page's visitor
+--      data (without it: "confirm you're not a bot").
+--   2. tv_samsung with cookies: ~1.9 s plus the ad wait. No watch page, no
+--      configs, no initial data (the ~1 s watch-next request).
+-- Both use a www URL (a music URL adds a web_music player request); views
+-- and likes come from api/stats.luau in-process. A tier's result is accepted
+-- only when it is audio-only. On a miss the next tier runs at once and the
+-- failed tier rests for FAST_BACKOFF_S, unless the miss is about the video
+-- itself (age gate, private, members-only), which says nothing about the
+-- client. Quality holds even when YouTube changes a client.
+local FAST_TIERS = {
+	{ name = "visionos", args = "youtube:player_client=visionos;player_skip=configs,initial_data", cookies = false },
+	{
+		name = "tv_samsung",
+		args = "youtube:player_client=tv_samsung;player_skip=webpage,configs,initial_data",
+		cookies = true,
+	},
+}
+local DEFAULT_TIER = #FAST_TIERS + 1
 local FAST_BACKOFF_S = 10 * 60
-local fast_disabled_until = 0
+local tier_disabled_until: { [number]: number } = {}
+local VIDEO_SPECIFIC_ERRORS = { "confirm your age", "Private video", "members-only", "Join this channel" }
 
-local function build_resolve_argv(safe_id: string, fast: boolean): { string }
+local function first_tier(from: number): number
+	local now = os.time()
+	for i = from, #FAST_TIERS do
+		if now >= (tier_disabled_until[i] or 0) then
+			return i
+		end
+	end
+	return DEFAULT_TIER
+end
+
+local function build_resolve_argv(safe_id: string, tier: number): { string }
 	-- yt-dlp's own client selection: the old forced mweb,web clients now
 	-- return only format 18 (a 360p video with AAC audio), never audio-only.
 	-- One extraction yields the stream URL (last line) plus view/like counts,
@@ -51,11 +76,12 @@ local function build_resolve_argv(safe_id: string, fast: boolean): { string }
 		"--no-playlist",
 		"--no-warnings",
 	}
+	local fast = FAST_TIERS[tier]
 	if fast then
 		table.insert(argv, "--extractor-args")
-		table.insert(argv, FAST_EXTRACTOR_ARGS)
+		table.insert(argv, fast.args)
 	end
-	if noctalia.fileExists(COOKIE_PATH) then
+	if (not fast or fast.cookies) and noctalia.fileExists(COOKIE_PATH) then
 		table.insert(argv, "--cookies")
 		table.insert(argv, COOKIE_PATH)
 	end
@@ -82,7 +108,7 @@ function EXPO.stream_duration(video_id: string): number?
 	return stream_durations[video_id]
 end
 local resolving_in_flight = {}
-local attempt_resolve: (string, number) -> () -- forward: resolve_stream parks the list, attempt spawns
+local attempt_resolve: (string, number, number?) -> () -- forward: resolve_stream parks the list, attempt spawns
 local STREAM_DISK_TTL = 4 * 3600
 
 function EXPO.get_audio_cache_path(video_id: string): string?
@@ -226,13 +252,12 @@ end
 -- Spawn the yt-dlp fetch for a video_id whose callback list is already parked
 -- in resolving_in_flight. Attempt 0 is the first try; on host spawn refusal
 -- (burst saturation from rapid skips) one delayed retry follows, then fail.
-attempt_resolve = function(video_id, attempt, fast)
-	if fast == nil then
-		fast = os.time() >= fast_disabled_until
-	end
+attempt_resolve = function(video_id, attempt, tier)
+	tier = tier or first_tier(1)
+	local fast = FAST_TIERS[tier]
 	local safe_id = video_id:gsub("[^%w%-_]", "_")
-	log("resolving stream URL for id=" .. video_id .. (fast and " (fast path)" or ""))
-	local argv = build_resolve_argv(safe_id, fast)
+	log("resolving stream URL for id=" .. video_id .. (fast and (" (fast path: " .. fast.name .. ")") or ""))
+	local argv = build_resolve_argv(safe_id, tier)
 	local started_ms = noctalia.nowMs()
 	local launched = network.runAsync(argv, function(res)
 		local elapsed_ms = noctalia.nowMs() - started_ms
@@ -250,8 +275,22 @@ attempt_resolve = function(video_id, attempt, fast)
 			local timed_out = type(res) == "table" and res.timedOut
 			local reaped = type(res) == "table" and (res.exitCode == 143 or res.exitCode == 137)
 			if not (url ~= "" and audio_only) and not offline and not timed_out and not reaped then
+				local err = type(res) == "table" and res.stderr or ""
+				local video_specific = false
+				for _, needle in ipairs(VIDEO_SPECIFIC_ERRORS) do
+					if err:find(needle, 1, true) then
+						video_specific = true
+						break
+					end
+				end
+				if not video_specific then
+					tier_disabled_until[tier] = os.time() + FAST_BACKOFF_S
+				end
+				local next_tier = first_tier(tier + 1)
 				log(
-					"fast path rejected for id="
+					"fast path "
+						.. fast.name
+						.. " rejected for id="
 						.. video_id
 						.. " (format "
 						.. tostring(_fid)
@@ -261,13 +300,13 @@ attempt_resolve = function(video_id, attempt, fast)
 						.. tostring(vcodec)
 						.. ", "
 						.. elapsed_ms
-						.. "ms); default clients, fast path off for "
-						.. FAST_BACKOFF_S
-						.. " s"
+						.. "ms"
+						.. (video_specific and ", video-specific" or (", tier off for " .. FAST_BACKOFF_S .. " s"))
+						.. "); next: "
+						.. (FAST_TIERS[next_tier] and FAST_TIERS[next_tier].name or "default clients")
 				)
-				fast_disabled_until = os.time() + FAST_BACKOFF_S
 				if resolving_in_flight[video_id] then
-					attempt_resolve(video_id, attempt, false)
+					attempt_resolve(video_id, attempt, next_tier)
 				end
 				return
 			end
@@ -328,7 +367,7 @@ attempt_resolve = function(video_id, attempt, fast)
 			log("stream resolve launch refused for id=" .. video_id .. ", retrying")
 			local scheduled = timer.after(1500, function()
 				if resolving_in_flight[video_id] then
-					attempt_resolve(video_id, attempt + 1, fast)
+					attempt_resolve(video_id, attempt + 1, tier)
 				end
 			end)
 			if scheduled then
